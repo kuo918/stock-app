@@ -5,6 +5,7 @@ import yfinance as yf
 import concurrent.futures
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import random
 
 # ==================== App 介面設定 ====================
 st.set_page_config(page_title="台股多空雙向轉折選股系統", page_icon="🔥", layout="wide")
@@ -14,7 +15,7 @@ st.markdown("---")
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# ==================== 核心數據獲取 ====================
+# ==================== 核心數據獲取與籌碼演算法 ====================
 @st.cache_data(ttl=3600)
 def fetch_all_markets():
     """抓取上市與上櫃資料"""
@@ -51,9 +52,40 @@ def parse_volume(vol_str):
     v = parse_number(vol_str)
     return v / 1000 if v > 100000 else v
 
+# --- 💡 新增：真實連買連賣演算法 ---
+def calculate_consecutive_days(net_buy_sell_list):
+    """
+    從最後交易日往前推算連買或連賣天數。
+    :param net_buy_sell_list: 每日買賣超數值的列表 [最新一日, 前一日, 前兩日...]
+    :return: 正數表示「連買天數」，負數表示「連賣天數」，0 表示無動作。
+    """
+    if not net_buy_sell_list: return 0
+    latest_val = net_buy_sell_list[0]
+    if latest_val == 0: return 0
+        
+    is_buying = latest_val > 0
+    consecutive_count = 0
+    
+    for val in net_buy_sell_list:
+        if is_buying and val > 0:
+            consecutive_count += 1
+        elif not is_buying and val < 0:
+            consecutive_count += 1
+        else:
+            break
+    return consecutive_count if is_buying else -consecutive_count
+
+def get_mock_institutional_data(code, inst_type="foreign"):
+    """
+    【模擬用】產生近 10 日的法人買賣超陣列。
+    實戰中請將此函數替換為真實的籌碼 API (如 FinMind 或 Fugle)。
+    """
+    random.seed(int(code[:4]) + (1 if inst_type == "foreign" else 2))
+    # 產生一個隨機的買賣超清單，數值有正有負
+    return [random.choice([-500, -200, -50, 0, 100, 300, 800]) for _ in range(10)]
+
 # ==================== 技術形態邏輯 (多空整合) ====================
 def check_patterns(df, strategy, selected_patterns):
-    """根據選擇的策略(多/空)與勾選的形態進行判斷"""
     if len(df) < 15: return False, "─"
     h_ma5, h_ma10 = df["5MA"].tail(6).tolist(), df["10MA"].tail(6).tolist()
     today, yesterday = df.iloc[-1], df.iloc[-2]
@@ -66,12 +98,10 @@ def check_patterns(df, strategy, selected_patterns):
 
     matched_tags = []
 
-    # --- 做多邏輯 ---
     if strategy == "做多 (Long)":
         is_bullish_alignment = today["5MA"] > today["10MA"] > today["20MA"] > today["30MA"] > today["50MA"]
         is_red_candle = c > o
 
-        # 1. 下半身紅K
         is_ma5_not_descending = ma5_today >= ma5_yesterday
         is_crossing_up = yesterday["Close"] <= ma5_yesterday or l <= ma5_today
         body_length = c - o
@@ -79,7 +109,6 @@ def check_patterns(df, strategy, selected_patterns):
         if "🔥 下半身紅K" in selected_patterns and is_red_candle and is_ma5_not_descending and is_crossing_up and is_half_above:
             matched_tags.append("🔥 下半身紅K")
 
-        # 2. 交叉拉回
         had_golden_cross = any(h_ma5[i - 1] <= h_ma10[i - 1] and h_ma5[i] > h_ma10[i] for i in range(1, len(h_ma5) - 1))
         is_ma10_up = ma10_today > h_ma10[0]
         had_pullback_close = any((h_ma5[i] > h_ma10[i]) and (h_ma5[i] - h_ma10[i] <= h_ma10[i] * 0.015) for i in range(len(h_ma5) - 1))
@@ -87,7 +116,6 @@ def check_patterns(df, strategy, selected_patterns):
         if "⚡ 交叉拉回" in selected_patterns and is_red_candle and had_golden_cross and is_ma10_up and had_pullback_close and is_break_ma5_today:
             matched_tags.append("⚡ 交叉拉回")
 
-        # 3. 空中加油
         is_ma10_rising = ma10_today > h_ma10[2]
         is_always_above = all(h_ma5[i] > h_ma10[i] for i in range(len(h_ma5)))
         distances = [h_ma5[i] - h_ma10[i] for i in range(len(h_ma5))]
@@ -96,35 +124,29 @@ def check_patterns(df, strategy, selected_patterns):
         if "⛽ 空中加油" in selected_patterns and is_ma10_rising and is_always_above and is_air_fueling and is_close_enough:
             matched_tags.append("⛽ 空中加油")
 
-        # 4. 五線多頭
         if "⭐ 五線多頭" in selected_patterns and is_bullish_alignment:
             matched_tags.append("⭐ 五線多頭")
 
-    # --- 放空邏輯 ---
     elif strategy == "放空 (Short)":
         is_bearish_alignment = today["5MA"] < today["10MA"] < today["20MA"] < today["30MA"] < today["50MA"]
         is_black_candle = c < o
 
-        # 1. 破線黑K
         is_ma5_not_ascending = ma5_today <= ma5_yesterday
         is_breaking_down = yesterday["Close"] >= ma5_yesterday and c < ma5_today
         if "🔥 破線黑K" in selected_patterns and is_black_candle and is_ma5_not_ascending and is_breaking_down:
             matched_tags.append("🔥 破線黑K")
 
-        # 2. 死亡交叉
         had_dead_cross = any(h_ma5[i - 1] >= h_ma10[i - 1] and h_ma5[i] < h_ma10[i] for i in range(1, len(h_ma5) - 1))
         is_ma10_down = ma10_today < h_ma10[0]
         if "⚡ 死亡交叉" in selected_patterns and had_dead_cross and is_ma10_down:
             matched_tags.append("⚡ 死亡交叉")
 
-        # 3. 反彈遇壓
         is_below_ma10 = all(h_ma5[i] < h_ma10[i] for i in range(len(h_ma5)))
         is_ma10_falling = ma10_today < h_ma10[2]
         touched_ma10 = h >= ma10_today and c < ma10_today
         if "⛽ 反彈遇壓" in selected_patterns and is_below_ma10 and is_ma10_falling and touched_ma10:
             matched_tags.append("⛽ 反彈遇壓")
 
-        # 4. 五線空頭
         if "⭐ 五線空頭" in selected_patterns and is_bearish_alignment:
             matched_tags.append("⭐ 五線空頭")
 
@@ -153,8 +175,8 @@ def analyze_stock(stock_info, strategy, selected_patterns):
                 "股票名稱": stock_name, 
                 "收盤價": round(float(today["Close"]), 2),
                 "今日成交量(張)": int(volume_sheets), 
-                "外資連續天數": int(f_consec),
-                "投信連續天數": int(t_consec),
+                "外資連動天數": int(f_consec), # 正數連買，負數連賣
+                "投信連動天數": int(t_consec), # 正數連買，負數連賣
                 "技術型態訊號": pattern_name
             }
     except:
@@ -162,7 +184,6 @@ def analyze_stock(stock_info, strategy, selected_patterns):
     return None
 
 def plot_kline(ticker_code, stock_name):
-    """繪製包含五條均線、布林通道、成交量與 KD 指標的 Plotly 互動圖"""
     ticker = f"{ticker_code}.TW"
     df = yf.download(ticker, period="8mo", progress=False) 
     if df.empty: return None, None
@@ -261,21 +282,26 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
         with st.spinner("正在執行漏斗式多維度交叉過濾，請稍候..."):
             df_all = fetch_all_markets()
             
-            # 💡 防呆保護機制：確保證交所資料抓取正常且有成交量欄位
             if not df_all.empty and 'TradeVolume' in df_all.columns:
                 df_filtered = df_all.copy()
                 df_filtered['Volume_Sheets'] = df_filtered['TradeVolume'].apply(parse_volume)
                 
-                # 模擬連買連賣天數
-                df_filtered['Foreign_Days'] = df_filtered['Code'].apply(lambda x: (int(x[:4]) * 17) % 8)
-                df_filtered['Trust_Days'] = df_filtered['Code'].apply(lambda x: (int(x[:4]) * 23) % 5)
+                # 💡 導入真實回推演算法，餵入模擬的日資料陣列
+                df_filtered['Foreign_Days'] = df_filtered['Code'].apply(lambda x: calculate_consecutive_days(get_mock_institutional_data(x, "foreign")))
+                df_filtered['Trust_Days'] = df_filtered['Code'].apply(lambda x: calculate_consecutive_days(get_mock_institutional_data(x, "trust")))
+
+                # 依據多空策略決定過濾邏輯
+                # 做多找正數(買超)，放空找負數(賣超)
+                if strategy == "做多 (Long)":
+                    if min_foreign_days > 0: df_filtered = df_filtered[df_filtered['Foreign_Days'] >= min_foreign_days]
+                    if min_trust_days > 0: df_filtered = df_filtered[df_filtered['Trust_Days'] >= min_trust_days]
+                else:
+                    if min_foreign_days > 0: df_filtered = df_filtered[df_filtered['Foreign_Days'] <= -min_foreign_days]
+                    if min_trust_days > 0: df_filtered = df_filtered[df_filtered['Trust_Days'] <= -min_trust_days]
 
                 if "Top 500" in hot_filter: df_filtered = df_filtered.nlargest(500, 'Volume_Sheets')
                 elif "Top 100" in hot_filter: df_filtered = df_filtered.nlargest(100, 'Volume_Sheets')
                 df_filtered = df_filtered[df_filtered['Volume_Sheets'] >= min_volume]
-
-                if min_foreign_days > 0: df_filtered = df_filtered[df_filtered['Foreign_Days'] >= min_foreign_days]
-                if min_trust_days > 0: df_filtered = df_filtered[df_filtered['Trust_Days'] >= min_trust_days]
 
                 st.info(f"✅ 基本條件與籌碼過濾完畢，共 **{len(df_filtered)}** 檔股票進入技術形態掃描...")
 
@@ -301,7 +327,6 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
                     st.session_state.scan_completed = True
             
             else:
-                # 💡 當 API 資料異常時顯示友善錯誤
                 st.error("⚠️ 無法取得證交所即時資料（可能因假日維護或連線擁塞），請稍後再試。")
                 st.session_state.scan_completed = False
 
@@ -329,8 +354,8 @@ if st.session_state.scan_completed:
             if selected_stock:
                 selected_code, selected_name = selected_stock.split(" - ")
                 stock_data = df_final[df_final['代碼'] == selected_code].iloc[0]
-                f_consec = stock_data['外資連續天數']
-                t_consec = stock_data['投信連續天數']
+                f_consec = stock_data['外資連動天數']
+                t_consec = stock_data['投信連動天數']
                 
                 with st.spinner("載入即時 K 線與圖表中..."):
                     try:
@@ -342,20 +367,18 @@ if st.session_state.scan_completed:
                         st.markdown(f"### {selected_name} ({selected_code}) 今日量價統計")
                         metric_cols = st.columns(4)
                         
-                        # 成交價：上漲為紅箭頭，下跌為綠箭頭
                         metric_cols[0].metric("今日成交價", f"{stats['Close']:.2f}", f"{stats['Change']:.2f} ({stats['ChangePct']:.2f}%)", delta_color="inverse")
                         metric_cols[1].metric("今日成交張數", f"{stats['Volume']} 張")
                         
-                        # 法人籌碼動態配色
-                        f_display = f"連{'買' if strategy == '做多 (Long)' else '賣'} {f_consec} 天" if f_consec > 0 else "未連續"
-                        t_display = f"連{'買' if strategy == '做多 (Long)' else '賣'} {t_consec} 天" if t_consec > 0 else "未連續"
+                        # 依據數值正負號判斷買賣與顏色顯示
+                        f_text = f"連買 {f_consec} 天" if f_consec > 0 else (f"連賣 {abs(f_consec)} 天" if f_consec < 0 else "未連續")
+                        t_text = f"連買 {t_consec} 天" if t_consec > 0 else (f"連賣 {abs(t_consec)} 天" if t_consec < 0 else "未連續")
                         
-                        prefix = "" if strategy == "做多 (Long)" else "-"
-                        f_delta = f"{prefix}外資強勢" if f_consec >= 3 else None
-                        t_delta = f"{prefix}投信強勢" if t_consec >= 2 else None
+                        f_delta = f"外資強勢" if f_consec >= 3 else (f"-外資弱勢" if f_consec <= -3 else None)
+                        t_delta = f"投信強勢" if t_consec >= 2 else (f"-投信弱勢" if t_consec <= -2 else None)
                         
-                        metric_cols[2].metric("外資(不含自營)籌碼", f_display, delta=f_delta, delta_color="inverse")
-                        metric_cols[3].metric("投信籌碼", t_display, delta=t_delta, delta_color="inverse")
+                        metric_cols[2].metric("外資(不含自營)籌碼", f_text, delta=f_delta, delta_color="inverse")
+                        metric_cols[3].metric("投信籌碼", t_text, delta=t_delta, delta_color="inverse")
                         
                         st.markdown("---")
                         st.plotly_chart(fig)
