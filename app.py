@@ -10,7 +10,7 @@ import random
 # ==================== App 介面設定 ====================
 st.set_page_config(page_title="台股多空雙向轉折選股系統", page_icon="🔥", layout="wide")
 st.title("🔥 台股多空雙向綜合選股系統")
-st.markdown("**(多層次漏斗篩選：流動性 ➔ 技術形態 ➔ 籌碼面)**")
+st.markdown("**(多層次漏斗篩選：Yahoo即時流動性 ➔ 技術形態 ➔ 籌碼面)**")
 st.markdown("---")
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -18,13 +18,14 @@ HEADERS = {"User-Agent": "Mozilla/5.0"}
 # ==================== 核心數據獲取與籌碼演算法 ====================
 @st.cache_data(ttl=3600)
 def fetch_all_markets():
-    """抓取上市與上櫃資料"""
+    """抓取上市與上櫃資料，並自動配置正確的 Yahoo 股票代號"""
     dfs = []
     try:
         res_twse = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=HEADERS, timeout=10)
         if res_twse.status_code == 200:
             df_twse = pd.DataFrame(res_twse.json())
             df_twse['Market'] = '上市'
+            df_twse['YF_Ticker'] = df_twse['Code'] + '.TW'  # 上市代碼
             dfs.append(df_twse)
     except: pass
 
@@ -32,8 +33,9 @@ def fetch_all_markets():
         res_tpex = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=HEADERS, timeout=10)
         if res_tpex.status_code == 200:
             df_tpex = pd.DataFrame(res_tpex.json())
-            df_tpex = df_tpex.rename(columns={'SecuritiesCompanyCode': 'Code', 'CompanyName': 'Name', 'TradingVolume': 'TradeVolume', 'TradingAmount': 'TradeValue'})
+            df_tpex = df_tpex.rename(columns={'SecuritiesCompanyCode': 'Code', 'CompanyName': 'Name'})
             df_tpex['Market'] = '上櫃'
+            df_tpex['YF_Ticker'] = df_tpex['Code'] + '.TWO' # 上櫃代碼
             dfs.append(df_tpex)
     except: pass
 
@@ -44,21 +46,8 @@ def fetch_all_markets():
         return df_all
     return pd.DataFrame()
 
-def parse_number(val_str):
-    try: return float(str(val_str).replace(',', ''))
-    except: return 0
-
-def parse_volume(vol_str):
-    v = parse_number(vol_str)
-    return v / 1000 if v > 100000 else v
-
-# --- 💡 新增：真實連買連賣演算法 ---
 def calculate_consecutive_days(net_buy_sell_list):
-    """
-    從最後交易日往前推算連買或連賣天數。
-    :param net_buy_sell_list: 每日買賣超數值的列表 [最新一日, 前一日, 前兩日...]
-    :return: 正數表示「連買天數」，負數表示「連賣天數」，0 表示無動作。
-    """
+    """從最後交易日往前推算連買或連賣天數"""
     if not net_buy_sell_list: return 0
     latest_val = net_buy_sell_list[0]
     if latest_val == 0: return 0
@@ -76,12 +65,8 @@ def calculate_consecutive_days(net_buy_sell_list):
     return consecutive_count if is_buying else -consecutive_count
 
 def get_mock_institutional_data(code, inst_type="foreign"):
-    """
-    【模擬用】產生近 10 日的法人買賣超陣列。
-    實戰中請將此函數替換為真實的籌碼 API (如 FinMind 或 Fugle)。
-    """
+    """【模擬用】產生近 10 日的法人買賣超陣列 (未來可替換為真實 API)"""
     random.seed(int(code[:4]) + (1 if inst_type == "foreign" else 2))
-    # 產生一個隨機的買賣超清單，數值有正有負
     return [random.choice([-500, -200, -50, 0, 100, 300, 800]) for _ in range(10)]
 
 # ==================== 技術形態邏輯 (多空整合) ====================
@@ -154,6 +139,7 @@ def check_patterns(df, strategy, selected_patterns):
     return False, "─"
 
 def analyze_stock(stock_info, strategy, selected_patterns):
+    # 這裡的 ticker 已經是包含 .TW 或 .TWO 的完整 Yahoo 代號
     ticker, stock_name, volume_sheets, f_consec, t_consec = stock_info
     try:
         df = yf.download(ticker, period="1y", progress=False)
@@ -171,21 +157,21 @@ def analyze_stock(stock_info, strategy, selected_patterns):
 
         if is_match:
             return {
-                "代碼": ticker.replace(".TW", ""), 
+                "代碼": ticker.replace(".TW", "").replace(".TWO", ""), 
+                "YF_Ticker": ticker,
                 "股票名稱": stock_name, 
                 "收盤價": round(float(today["Close"]), 2),
                 "今日成交量(張)": int(volume_sheets), 
-                "外資連動天數": int(f_consec), # 正數連買，負數連賣
-                "投信連動天數": int(t_consec), # 正數連買，負數連賣
+                "外資連動天數": int(f_consec), 
+                "投信連動天數": int(t_consec), 
                 "技術型態訊號": pattern_name
             }
     except:
         return None
     return None
 
-def plot_kline(ticker_code, stock_name):
-    ticker = f"{ticker_code}.TW"
-    df = yf.download(ticker, period="8mo", progress=False) 
+def plot_kline(yf_ticker, stock_name):
+    df = yf.download(yf_ticker, period="8mo", progress=False) 
     if df.empty: return None, None
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
 
@@ -279,19 +265,33 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
     if not selected_patterns:
         st.sidebar.error("請至少選擇一個技術形態！")
     else:
-        with st.spinner("正在執行漏斗式多維度交叉過濾，請稍候..."):
+        with st.spinner("正在執行漏斗式多維度交叉過濾 (📡 正在向 Yahoo 請求全市場即時成交量，約需 5 秒)..."):
             df_all = fetch_all_markets()
             
-            if not df_all.empty and 'TradeVolume' in df_all.columns:
+            if not df_all.empty:
                 df_filtered = df_all.copy()
-                df_filtered['Volume_Sheets'] = df_filtered['TradeVolume'].apply(parse_volume)
                 
-                # 💡 導入真實回推演算法，餵入模擬的日資料陣列
+                # --- 💡 核心變更：Yahoo 即時成交量批次獲取引擎 ---
+                try:
+                    tickers_list = df_filtered['YF_Ticker'].tolist()
+                    yf_vols = yf.download(tickers_list, period="1d", progress=False)['Volume']
+                    
+                    if isinstance(yf_vols, pd.Series): 
+                        latest_vols = {tickers_list[0]: yf_vols.iloc[-1]}
+                    else:
+                        latest_vols = yf_vols.iloc[-1]
+                        
+                    # 對應回表格並換算成「張」
+                    df_filtered['Volume_Sheets'] = df_filtered['YF_Ticker'].map(latest_vols) / 1000
+                    df_filtered['Volume_Sheets'] = df_filtered['Volume_Sheets'].fillna(0).astype(int)
+                except Exception as e:
+                    st.error("⚠️ 無法獲取 Yahoo 即時成交量，請稍後再試。")
+                    st.stop()
+                # ------------------------------------------------
+
                 df_filtered['Foreign_Days'] = df_filtered['Code'].apply(lambda x: calculate_consecutive_days(get_mock_institutional_data(x, "foreign")))
                 df_filtered['Trust_Days'] = df_filtered['Code'].apply(lambda x: calculate_consecutive_days(get_mock_institutional_data(x, "trust")))
 
-                # 依據多空策略決定過濾邏輯
-                # 做多找正數(買超)，放空找負數(賣超)
                 if strategy == "做多 (Long)":
                     if min_foreign_days > 0: df_filtered = df_filtered[df_filtered['Foreign_Days'] >= min_foreign_days]
                     if min_trust_days > 0: df_filtered = df_filtered[df_filtered['Trust_Days'] >= min_trust_days]
@@ -303,10 +303,10 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
                 elif "Top 100" in hot_filter: df_filtered = df_filtered.nlargest(100, 'Volume_Sheets')
                 df_filtered = df_filtered[df_filtered['Volume_Sheets'] >= min_volume]
 
-                st.info(f"✅ 基本條件與籌碼過濾完畢，共 **{len(df_filtered)}** 檔股票進入技術形態掃描...")
+                st.info(f"✅ 即時流動性與籌碼過濾完畢，共 **{len(df_filtered)}** 檔股票進入技術形態掃描...")
 
                 active_pool = [
-                    (f"{row['Code']}.TW", row['Name'], row['Volume_Sheets'], row['Foreign_Days'], row['Trust_Days']) 
+                    (row['YF_Ticker'], row['Name'], row['Volume_Sheets'], row['Foreign_Days'], row['Trust_Days']) 
                     for _, row in df_filtered.iterrows()
                 ]
 
@@ -325,9 +325,8 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
                 else:
                     st.session_state.df_final = pd.DataFrame()
                     st.session_state.scan_completed = True
-            
             else:
-                st.error("⚠️ 無法取得證交所即時資料（可能因假日維護或連線擁塞），請稍後再試。")
+                st.error("⚠️ 無法獲取台股代碼清單，請稍後再試。")
                 st.session_state.scan_completed = False
 
 # ==================== 顯示結果與智慧配色 ====================
@@ -340,7 +339,10 @@ if st.session_state.scan_completed:
         
         with col1:
             st.markdown(f"### 📊 篩選結果清單 ({strategy})")
-            st.dataframe(df_final, width="stretch", hide_index=True)
+            
+            # 準備顯示用的 DataFrame，隱藏不必要的 YF_Ticker 欄位
+            display_df = df_final.drop(columns=['YF_Ticker'])
+            st.dataframe(display_df, width="stretch", hide_index=True)
             
             options = [f"{row['代碼']} - {row['股票名稱']}" for _, row in df_final.iterrows()]
             selected_stock = st.selectbox("👇 點擊下方清單查看走勢：", options)
@@ -354,12 +356,13 @@ if st.session_state.scan_completed:
             if selected_stock:
                 selected_code, selected_name = selected_stock.split(" - ")
                 stock_data = df_final[df_final['代碼'] == selected_code].iloc[0]
+                yf_ticker = stock_data['YF_Ticker']
                 f_consec = stock_data['外資連動天數']
                 t_consec = stock_data['投信連動天數']
                 
                 with st.spinner("載入即時 K 線與圖表中..."):
                     try:
-                        fig, stats = plot_kline(selected_code, selected_name)
+                        fig, stats = plot_kline(yf_ticker, selected_name)
                     except:
                         fig, stats = None, None
                         
@@ -370,7 +373,6 @@ if st.session_state.scan_completed:
                         metric_cols[0].metric("今日成交價", f"{stats['Close']:.2f}", f"{stats['Change']:.2f} ({stats['ChangePct']:.2f}%)", delta_color="inverse")
                         metric_cols[1].metric("今日成交張數", f"{stats['Volume']} 張")
                         
-                        # 依據數值正負號判斷買賣與顏色顯示
                         f_text = f"連買 {f_consec} 天" if f_consec > 0 else (f"連賣 {abs(f_consec)} 天" if f_consec < 0 else "未連續")
                         t_text = f"連買 {t_consec} 天" if t_consec > 0 else (f"連賣 {abs(t_consec)} 天" if t_consec < 0 else "未連續")
                         
