@@ -2,7 +2,6 @@ import streamlit as st
 import requests
 import pandas as pd
 import yfinance as yf
-import concurrent.futures
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import random
@@ -10,15 +9,16 @@ import random
 # ==================== App 介面設定 ====================
 st.set_page_config(page_title="台股多空雙向轉折選股系統", page_icon="🔥", layout="wide")
 st.title("🔥 台股多空雙向綜合選股系統")
-st.markdown("**(多層次漏斗篩選：極速流動性 ➔ Yahoo即時量 ➔ 技術形態 ➔ 籌碼面)**")
+st.markdown("**(多層次漏斗篩選：極速流動性 ➔ 巨量批次即時量 ➔ 記憶體形態分析 ➔ 籌碼面)**")
 st.markdown("---")
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 # ==================== 核心數據獲取與籌碼演算法 ====================
 @st.cache_data(ttl=3600)
 def fetch_all_markets():
     """多重備援架構：抓取上市與上櫃資料，突破雲端 IP 封鎖"""
     dfs = []
-    HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     def safe_vol(x):
         try:
@@ -26,7 +26,7 @@ def fetch_all_markets():
             return v / 1000 if v > 100000 else v
         except: return 0
 
-    # --- 策略 1: 官方 OpenAPI ---
+    # 策略 1: 官方 OpenAPI
     try:
         res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=HEADERS, timeout=5)
         if res.status_code == 200:
@@ -48,7 +48,7 @@ def fetch_all_markets():
             dfs.append(df)
     except: pass
 
-    # --- 策略 2: 官方主網頁 API (若 OpenAPI 封鎖雲端 IP) ---
+    # 策略 2: 官方主網頁 API
     if not dfs:
         try:
             res = requests.get("https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=json", headers=HEADERS, timeout=5)
@@ -74,7 +74,7 @@ def fetch_all_markets():
                 dfs.append(df)
         except: pass
 
-    # --- 策略 3: 民間開源 API (FinMind) 終極備用 ---
+    # 策略 3: 民間開源 API (FinMind) 終極備用
     if not dfs:
         try:
             res = requests.get("https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo", headers=HEADERS, timeout=8)
@@ -84,7 +84,7 @@ def fetch_all_markets():
                 df = df.rename(columns={'stock_id': 'Code', 'stock_name': 'Name'})
                 df['Market'] = df['type'].apply(lambda x: '上市' if 'twse' in str(x).lower() else '上櫃')
                 df['YF_Ticker'] = df.apply(lambda row: f"{row['Code']}.TW" if row['Market'] == '上市' else f"{row['Code']}.TWO", axis=1)
-                df['API_Volume'] = 999999  # 強制給大成交量，讓後續交給 Yahoo API 負責過濾
+                df['API_Volume'] = 999999
                 dfs.append(df)
         except: pass
 
@@ -166,7 +166,7 @@ def check_patterns(df, strategy, selected_patterns):
 
         is_ma5_not_ascending = ma5_today <= ma5_yesterday
         is_breaking_down = yesterday["Close"] >= ma5_yesterday and c < ma5_today
-        if "🔥 破線黑K" in selected_patterns and is_black_candle and is_ma5_not_ascending and is_breaking_down:
+        if "🔥 破線黑K" in selected_patterns && is_black_candle and is_ma5_not_ascending and is_breaking_down:
             matched_tags.append("🔥 破線黑K")
 
         had_dead_cross = any(h_ma5[i - 1] >= h_ma10[i - 1] and h_ma5[i] < h_ma10[i] for i in range(1, len(h_ma5) - 1))
@@ -185,37 +185,6 @@ def check_patterns(df, strategy, selected_patterns):
 
     if matched_tags: return True, " | ".join(matched_tags)
     return False, "─"
-
-def analyze_stock(stock_info, strategy, selected_patterns):
-    ticker, stock_name, volume_sheets, f_consec, t_consec = stock_info
-    try:
-        df = yf.download(ticker, period="1y", progress=False)
-        if df.empty or len(df) < 65: return None
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
-
-        df["5MA"] = df["Close"].rolling(window=5).mean()
-        df["10MA"] = df["Close"].rolling(window=10).mean()
-        df["20MA"] = df["Close"].rolling(window=20).mean()
-        df["30MA"] = df["Close"].rolling(window=30).mean()
-        df["50MA"] = df["Close"].rolling(window=50).mean()
-
-        is_match, pattern_name = check_patterns(df, strategy, selected_patterns)
-        today = df.iloc[-1]
-
-        if is_match:
-            return {
-                "代碼": ticker.split(".")[0], 
-                "YF_Ticker": ticker,
-                "股票名稱": stock_name, 
-                "收盤價": round(float(today["Close"]), 2),
-                "今日成交量(張)": int(volume_sheets), 
-                "外資連動天數": int(f_consec), 
-                "投信連動天數": int(t_consec), 
-                "技術型態訊號": pattern_name
-            }
-    except:
-        return None
-    return None
 
 def plot_kline(yf_ticker, stock_name):
     df = yf.download(yf_ticker, period="8mo", progress=False) 
@@ -312,15 +281,15 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
     if not selected_patterns:
         st.sidebar.error("請至少選擇一個技術形態！")
     else:
-        with st.spinner("正在執行漏斗式多維度過濾..."):
+        with st.spinner("正在啟動巨量批次過濾引擎..."):
             df_all = fetch_all_markets()
             
             if not df_all.empty:
                 df_filtered = df_all.copy()
                 
+                # 第一關：使用政府高速 API 先過濾成交量
                 if "Top 500" in hot_filter: df_filtered = df_filtered.nlargest(500, 'API_Volume')
                 elif "Top 100" in hot_filter: df_filtered = df_filtered.nlargest(100, 'API_Volume')
-                
                 df_filtered = df_filtered[df_filtered['API_Volume'] >= min_volume]
                 
                 remaining_count = len(df_filtered)
@@ -328,48 +297,74 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
                     st.warning("⚠️ 第一關成交量篩選後已無符合股票，請放寬量能門檻！")
                     st.stop()
                     
+                tickers_list = df_filtered['YF_Ticker'].tolist()
                 progress_bar = st.empty()
-                progress_bar.info(f"📡 已成功淘汰千檔低量股！僅送出 【{remaining_count}檔】 精英股向 Yahoo 請求即時量...")
+                progress_bar.info(f"⚡ 正在向 Yahoo 執行「單次巨量批次下載」({remaining_count} 檔股票)...")
 
+                # 💡💡 核心優化：1次請求拉回所有股票 1 年的技術資料 💡💡
                 try:
-                    tickers_list = df_filtered['YF_Ticker'].tolist()
-                    yf_vols = yf.download(tickers_list, period="1d", progress=False)['Volume']
-                    
-                    if isinstance(yf_vols, pd.Series): 
-                        latest_vols = {tickers_list[0]: yf_vols.iloc[-1]}
-                    else:
-                        latest_vols = yf_vols.iloc[-1]
-                        
-                    df_filtered['Volume_Sheets'] = df_filtered['YF_Ticker'].map(latest_vols) / 1000
-                    df_filtered['Volume_Sheets'] = df_filtered['Volume_Sheets'].fillna(0).astype(int)
+                    # group_by="ticker" 讓資料整齊地以股票代號分組
+                    batch_df = yf.download(tickers_list, period="1y", group_by="ticker", progress=False)
                 except Exception as e:
-                    st.error("⚠️ 無法獲取 Yahoo 即時成交量，請稍後再試。")
+                    st.error(f"⚠️ Yahoo Finance 批次連線超時，請稍後再試。原因: {e}")
                     st.stop()
 
-                df_filtered['Foreign_Days'] = df_filtered['Code'].apply(lambda x: calculate_consecutive_days(get_mock_institutional_data(x, "foreign")))
-                df_filtered['Trust_Days'] = df_filtered['Code'].apply(lambda x: calculate_consecutive_days(get_mock_institutional_data(x, "trust")))
-
-                if strategy == "做多 (Long)":
-                    if min_foreign_days > 0: df_filtered = df_filtered[df_filtered['Foreign_Days'] >= min_foreign_days]
-                    if min_trust_days > 0: df_filtered = df_filtered[df_filtered['Trust_Days'] >= min_trust_days]
-                else:
-                    if min_foreign_days > 0: df_filtered = df_filtered[df_filtered['Foreign_Days'] <= -min_foreign_days]
-                    if min_trust_days > 0: df_filtered = df_filtered[df_filtered['Trust_Days'] <= -min_trust_days]
-
-                progress_bar.info(f"✅ 即時流動性與籌碼過濾完畢，剩餘 **{len(df_filtered)}** 檔精選標的進入技術形態掃描...")
-
-                active_pool = [
-                    (row['YF_Ticker'], row['Name'], row['Volume_Sheets'], row['Foreign_Days'], row['Trust_Days']) 
-                    for _, row in df_filtered.iterrows()
-                ]
-
                 results = []
-                if active_pool:
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-                        future_to_stock = {executor.submit(analyze_stock, item, strategy, selected_patterns): item for item in active_pool}
-                        for future in concurrent.futures.as_completed(future_to_stock):
-                            res = future.result()
-                            if res: results.append(res)
+                
+                # 💡💡 完全在記憶體內(In-Memory)高速跑迴圈，沒有任何網路延遲 💡💡
+                for _, row in df_filtered.iterrows():
+                    ticker = row['YF_Ticker']
+                    name = row['Name']
+                    code = row['Code']
+                    
+                    # 從大批次 DataFrame 中抽出單一股票的歷史紀錄
+                    if len(tickers_list) == 1:
+                        sub_df = batch_df.copy()
+                    else:
+                        if isinstance(batch_df.columns, pd.MultiIndex):
+                            if ticker in batch_df.columns.levels[0]:
+                                sub_df = batch_df[ticker].dropna(subset=['Close'])
+                            else: continue
+                        else:
+                            sub_df = batch_df.dropna(subset=['Close'])
+                            
+                    if sub_df.empty or len(sub_df) < 65: continue
+                    
+                    # 記憶體內高效率計算移動平均線
+                    sub_df["5MA"] = sub_df["Close"].rolling(window=5).mean()
+                    sub_df["10MA"] = sub_df["Close"].rolling(window=10).mean()
+                    sub_df["20MA"] = sub_df["Close"].rolling(window=20).mean()
+                    sub_df["30MA"] = sub_df["Close"].rolling(window=30).mean()
+                    sub_df["50MA"] = sub_df["Close"].rolling(window=50).mean()
+
+                    # 檢查技術形態
+                    is_match, pattern_name = check_patterns(sub_df, strategy, selected_patterns)
+                    if is_match:
+                        today_row = sub_df.iloc[-1]
+                        volume_sheets = int(today_row['Volume'] / 1000) # 即時成交張數
+                        
+                        # 籌碼面往前推算演算法
+                        f_consec = calculate_consecutive_days(get_mock_institutional_data(code, "foreign"))
+                        t_consec = calculate_consecutive_days(get_mock_institutional_data(code, "trust"))
+
+                        # 篩選籌碼門檻
+                        if strategy == "做多 (Long)":
+                            if min_foreign_days > 0 and f_consec < min_foreign_days: continue
+                            if min_trust_days > 0 and t_consec < min_trust_days: continue
+                        else:
+                            if min_foreign_days > 0 and f_consec > -min_foreign_days: continue
+                            if min_trust_days > 0 and t_consec > -min_trust_days: continue
+                            
+                        results.append({
+                            "代碼": code, # 純數字，不再含有尾巴的 O
+                            "YF_Ticker": ticker,
+                            "股票名稱": name, 
+                            "收盤價": round(float(today_row["Close"]), 2),
+                            "今日成交量(張)": volume_sheets, 
+                            "外資連動天數": int(f_consec), 
+                            "投信連動天數": int(t_consec), 
+                            "技術型態訊號": pattern_name
+                        })
 
                 if results:
                     df_final = pd.DataFrame(results).sort_values(by="今日成交量(張)", ascending=False)
@@ -426,8 +421,7 @@ if st.session_state.scan_completed:
                                 realtime_vol_shares = tkr.info.get('regularMarketVolume', 0)
                                 if realtime_vol_shares > 0:
                                     stats['Volume'] = int(realtime_vol_shares / 1000)
-                        except:
-                            pass 
+                        except: pass 
 
                     except:
                         fig, stats = None, None
