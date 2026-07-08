@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import yfinance as yf
+import concurrent.futures
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import random
@@ -9,16 +10,15 @@ import random
 # ==================== App 介面設定 ====================
 st.set_page_config(page_title="台股多空雙向轉折選股系統", page_icon="🔥", layout="wide")
 st.title("🔥 台股多空雙向綜合選股系統")
-st.markdown("**(多層次漏斗篩選：極速流動性 ➔ 記憶體大批次即時量 ➔ 零延遲形態與籌碼分析)**")
+st.markdown("**(多層次漏斗篩選：極速流動性 ➔ 官方/Yahoo即時量 ➔ 技術形態 ➔ 籌碼面)**")
 st.markdown("---")
-
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 # ==================== 核心數據獲取與籌碼演算法 ====================
 @st.cache_data(ttl=3600)
 def fetch_all_markets():
-    """多重備援架構：抓取上市與上櫃資料，突破雲端 IP 封鎖"""
+    """多重備援架構：抓取上市、上櫃與【興櫃】資料"""
     dfs = []
+    HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     def safe_vol(x):
         try:
@@ -28,6 +28,7 @@ def fetch_all_markets():
 
     # --- 策略 1: 官方 OpenAPI ---
     try:
+        # 1. 上市
         res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=HEADERS, timeout=5)
         if res.status_code == 200:
             df = pd.DataFrame(res.json())
@@ -38,6 +39,7 @@ def fetch_all_markets():
     except: pass
 
     try:
+        # 2. 上櫃
         res = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=HEADERS, timeout=5)
         if res.status_code == 200:
             df = pd.DataFrame(res.json())
@@ -48,7 +50,19 @@ def fetch_all_markets():
             dfs.append(df)
     except: pass
 
-    # --- 策略 2: 官方主網頁 API (若 OpenAPI 封鎖雲端 IP) ---
+    try:
+        # 3. 💡 新增：興櫃 (Emerging Stocks)
+        res = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_esb_quotes", headers=HEADERS, timeout=5)
+        if res.status_code == 200:
+            df = pd.DataFrame(res.json())
+            df = df.rename(columns={'SecuritiesCompanyCode': 'Code', 'CompanyName': 'Name'})
+            df['Market'] = '興櫃'
+            df['YF_Ticker'] = df['Code'] + '.TWO' # Yahoo 興櫃一樣用 .TWO
+            df['API_Volume'] = df['TradingVolume'].apply(safe_vol)
+            dfs.append(df)
+    except: pass
+
+    # --- 策略 2: 官方主網頁 API (備用) ---
     if not dfs:
         try:
             res = requests.get("https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=json", headers=HEADERS, timeout=5)
@@ -71,20 +85,6 @@ def fetch_all_markets():
                 df['Market'] = '上櫃'
                 df['YF_Ticker'] = df['Code'] + '.TWO'
                 df['API_Volume'] = df['TradingVolume'].apply(safe_vol)
-                dfs.append(df)
-        except: pass
-
-    # --- 策略 3: 民間開源 API (FinMind) 終極備用 ---
-    if not dfs:
-        try:
-            res = requests.get("https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo", headers=HEADERS, timeout=8)
-            if res.status_code == 200:
-                df = pd.DataFrame(res.json()['data'])
-                df = df[df['stock_id'].apply(lambda x: len(str(x)) == 4 and str(x).isdigit())]
-                df = df.rename(columns={'stock_id': 'Code', 'stock_name': 'Name'})
-                df['Market'] = df['type'].apply(lambda x: '上市' if 'twse' in str(x).lower() else '上櫃')
-                df['YF_Ticker'] = df.apply(lambda row: f"{row['Code']}.TW" if row['Market'] == '上市' else f"{row['Code']}.TWO", axis=1)
-                df['API_Volume'] = 999999  
                 dfs.append(df)
         except: pass
 
@@ -117,7 +117,7 @@ def get_mock_institutional_data(code, inst_type="foreign"):
     random.seed(int(code[:4]) + (1 if inst_type == "foreign" else 2))
     return [random.choice([-500, -200, -50, 0, 100, 300, 800]) for _ in range(10)]
 
-# ==================== 技術形態邏輯 (多空整合) ====================
+# ==================== 技術形態邏輯 ====================
 def check_patterns(df, strategy, selected_patterns):
     if len(df) < 15: return False, "─"
     h_ma5, h_ma10 = df["5MA"].tail(6).tolist(), df["10MA"].tail(6).tolist()
@@ -258,7 +258,7 @@ hot_filter = st.sidebar.selectbox("🔥 排行榜預篩:", ["🈚 無 (全市場
 min_volume = st.sidebar.number_input("📉 核心成交量門檻 (張數 >):", min_value=0, max_value=50000, value=500, step=100)
 
 st.sidebar.markdown("---")
-st.sidebar.header("⚙️ 步驟釋：第二層技術形態")
+st.sidebar.header("⚙️ 步驟三：第二層技術形態")
 if strategy == "做多 (Long)":
     available_patterns = ["🔥 下半身紅K", "⚡ 交叉拉回", "⛽ 空中加油", "⭐ 五線多頭"]
 else:
@@ -287,7 +287,6 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
             if not df_all.empty:
                 df_filtered = df_all.copy()
                 
-                # 第一步：用極速開放資料 API 把沒量或不符合排行榜的股票直接刷掉 (前置過濾)
                 if "Top 500" in hot_filter: df_filtered = df_filtered.nlargest(500, 'API_Volume')
                 elif "Top 100" in hot_filter: df_filtered = df_filtered.nlargest(100, 'API_Volume')
                 df_filtered = df_filtered[df_filtered['API_Volume'] >= min_volume]
@@ -301,7 +300,6 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
                 progress_bar = st.empty()
                 progress_bar.info(f"📡 已成功淘汰千檔低量股！僅送出 【{remaining_count}檔】 精英股向 Yahoo 執行大批次下載...")
 
-                # 💡💡【大提速優化 1】將 period 縮短為精準的 3 個月（3mo），資料傳輸量立刻縮減 75% 💡💡
                 try:
                     batch_df = yf.download(tickers_list, period="3mo", group_by="ticker", progress=False)
                 except Exception as e:
@@ -310,11 +308,11 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
 
                 results = []
                 
-                # 💡💡【大提速優化 2】完全在地端記憶體（In-Memory）中跑迴圈，不再執行額外的網頁請求 💡💡
                 for _, row in df_filtered.iterrows():
                     ticker = row['YF_Ticker']
                     name = row['Name']
                     code = row['Code']
+                    market = row.get('Market', '未知') # 取得市場類型
                     
                     sub_df = pd.DataFrame()
                     if len(tickers_list) == 1:
@@ -328,28 +326,28 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
                             
                     if sub_df.empty or len(sub_df) < 15: continue
                     
-                    # 記憶體內高效率計算移動平均線
                     sub_df["5MA"] = sub_df["Close"].rolling(window=5).mean()
                     sub_df["10MA"] = sub_df["Close"].rolling(window=10).mean()
                     sub_df["20MA"] = sub_df["Close"].rolling(window=20).mean()
                     sub_df["30MA"] = sub_df["Close"].rolling(window=30).mean()
                     sub_df["50MA"] = sub_df["Close"].rolling(window=50).mean()
 
-                    # 檢查技術形態
                     is_match, pattern_name = check_patterns(sub_df, strategy, selected_patterns)
                     if is_match:
                         today_row = sub_df.iloc[-1]
                         
-                        # 💡💡【成交量 0 漏洞修復】雙重防呆機制 💡💡
-                        # 讀取 Yahoo 當日即時量，如果 Yahoo 剛好回傳 0 或 NaN，強制退回使用最穩定、精準的官方 API 成交量！
                         y_vol = int(today_row['Volume'] / 1000) if 'Volume' in today_row and pd.notna(today_row['Volume']) else 0
-                        volume_sheets = y_vol if y_vol > 0 else int(row['API_Volume'])
                         
-                        # 籌碼面往前推算演算法
+                        # 💡💡【興櫃成交量漏洞完美修復】 💡💡
+                        # 判定如果是「興櫃」股票，強制切斷 Yahoo 的錯誤量，100% 使用政府官方量
+                        if market == '興櫃':
+                            volume_sheets = int(row['API_Volume'])
+                        else:
+                            volume_sheets = y_vol if y_vol > 0 else int(row['API_Volume'])
+                        
                         f_consec = calculate_consecutive_days(get_mock_institutional_data(code, "foreign"))
                         t_consec = calculate_consecutive_days(get_mock_institutional_data(code, "trust"))
 
-                        # 篩選籌碼門檻
                         if strategy == "做多 (Long)":
                             if min_foreign_days > 0 and f_consec < min_foreign_days: continue
                             if min_trust_days > 0 and t_consec < min_trust_days: continue
@@ -358,6 +356,7 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
                             if min_trust_days > 0 and t_consec > -min_trust_days: continue
                             
                         results.append({
+                            "市場": market,       # 顯示市場別，讓您一眼看出是上市/上櫃還是興櫃
                             "代碼": code, 
                             "YF_Ticker": ticker,
                             "股票名稱": name, 
@@ -370,8 +369,6 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
 
                 if results:
                     df_final = pd.DataFrame(results).sort_values(by="今日成交量(張)", ascending=False)
-                    
-                    # 💡💡【二次安全過濾】再次確保最終顯示的今日成交量百分之百大於設定門檻 💡💡
                     df_final = df_final[df_final['今日成交量(張)'] >= min_volume]
                     
                     st.session_state.df_final = df_final
@@ -398,7 +395,7 @@ if st.session_state.scan_completed:
             display_df = df_final.drop(columns=['YF_Ticker'])
             st.dataframe(display_df, width="stretch", hide_index=True)
             
-            options = [f"{row['代碼']} - {row['股票名稱']}" for _, row in df_final.iterrows()]
+            options = [f"{row['代碼']} - {row['股票名稱']} ({row['市場']})" for _, row in df_final.iterrows()]
             selected_stock = st.selectbox("👇 點擊下方清單查看走勢：", options)
             
             if selected_stock:
@@ -408,9 +405,13 @@ if st.session_state.scan_completed:
         
         with col2:
             if selected_stock:
-                selected_code, selected_name = selected_stock.split(" - ")
+                # 處理選單字串格式 "代碼 - 名稱 (市場)"
+                selected_code = selected_stock.split(" - ")[0]
+                selected_name = selected_stock.split(" - ")[1].split(" (")[0]
+                
                 stock_data = df_final[df_final['代碼'] == selected_code].iloc[0]
                 yf_ticker = stock_data['YF_Ticker']
+                stock_market = stock_data['市場']
                 f_consec = stock_data['外資連動天數']
                 t_consec = stock_data['投信連動天數']
                 
@@ -429,9 +430,12 @@ if st.session_state.scan_completed:
                                     stats['Volume'] = int(realtime_vol_shares / 1000)
                         except: pass 
 
-                        # 最終報價防呆：若右側圖表的今日即時成交量為 0，同步退回使用最精準的初選清單內成交量
-                        if stats and stats['Volume'] <= 0:
-                            stats['Volume'] = stock_data['今日成交量(張)']
+                        # 💡 報價面板防呆：如果是興櫃，圖表上方的今日張數也強制顯示正確的量
+                        if stats:
+                            if stock_market == '興櫃':
+                                stats['Volume'] = stock_data['今日成交量(張)']
+                            elif stats['Volume'] <= 0:
+                                stats['Volume'] = stock_data['今日成交量(張)']
 
                     except:
                         fig, stats = None, None
