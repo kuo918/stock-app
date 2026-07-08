@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import yfinance as yf
 import polars as pl
+import concurrent.futures
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import random
@@ -10,7 +11,7 @@ import random
 # ==================== App 介面設定 ====================
 st.set_page_config(page_title="台股極速多空選股系統", page_icon="⚡", layout="wide")
 st.title("⚡ 台股極速多空選股系統 ")
-st.markdown("**(多層次漏斗篩選：極速流動性 ➔ Polars 全域矩陣 ➔ 技術形態 ➔ 籌碼面)**")
+st.markdown("**(多層次漏斗篩選：極速流動性 ➔ Polars 矩陣運算 ➔ 技術形態 ➔ 籌碼面)**")
 st.markdown("---")
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -26,6 +27,7 @@ def fetch_all_markets():
             return v / 1000 if v > 100000 else v
         except: return 0
 
+    # --- 策略 1: 官方 OpenAPI ---
     try:
         res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=HEADERS, timeout=5)
         if res.status_code == 200:
@@ -53,6 +55,7 @@ def fetch_all_markets():
             dfs.append(df)
     except: pass
 
+    # --- 策略 2 & 3: 官方主網頁與 FinMind (略，維持原結構) ---
     if not dfs:
         try:
             res = requests.get("https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo", headers=HEADERS, timeout=8)
@@ -66,6 +69,7 @@ def fetch_all_markets():
                 dfs.append(df)
         except: pass
 
+    # --- 策略 4: 終極靜態備用清單 (若所有 API 皆被封鎖) ---
     if not dfs:
         st.toast("⚠️ 雲端網路受限，已自動啟動內建熱門股備用清單！", icon="🛡️")
         fallback_data = [
@@ -77,11 +81,23 @@ def fetch_all_markets():
             ("2882", "國泰金", "上市", 15000), ("2886", "兆豐金", "上市", 15000),
             ("2002", "中鋼", "上市", 15000), ("1301", "台塑", "上市", 10000),
             ("2412", "中華電", "上市", 10000), ("1216", "統一", "上市", 10000),
+            ("2884", "玉山金", "上市", 10000), ("2609", "陽明", "上市", 10000),
             ("3034", "聯詠", "上市", 8000), ("3037", "欣興", "上市", 8000),
             ("3008", "大立光", "上市", 5000), ("2379", "瑞昱", "上市", 5000),
+            ("2615", "萬海", "上市", 5000), ("2885", "元大金", "上市", 5000),
+            ("2880", "華南金", "上市", 5000), ("2892", "第一金", "上市", 5000),
+            ("2883", "開發金", "上市", 5000), ("2887", "台新金", "上市", 5000),
+            ("2357", "華碩", "上市", 5000), ("2324", "仁寶", "上市", 5000),
             ("8069", "元太", "上櫃", 5000), ("3105", "穩懋", "上市", 5000),
             ("2345", "智邦", "上櫃", 5000), ("6488", "環球晶", "上櫃", 5000),
-            ("8299", "群聯", "上市", 5000)
+            ("8299", "群聯", "上市", 5000), ("3529", "力旺", "上櫃", 3000),
+            ("5483", "中美晶", "上櫃", 3000), ("5347", "世界", "上櫃", 3000),
+            ("1565", "精華", "上櫃", 2000), ("4966", "譜瑞-KY", "上櫃", 2000),
+            ("3293", "鈊象", "上櫃", 2000), ("8436", "大江", "上櫃", 1000),
+            ("6446", "藥華藥", "上櫃", 1000), ("3131", "弘塑", "上櫃", 1000),
+            ("3533", "嘉澤", "上市", 1000), ("5274", "信驊", "上櫃", 1000),
+            ("6669", "緯穎", "上市", 1000), ("6531", "愛普*", "上櫃", 1000),
+            ("8046", "南電", "上市", 1000), ("3661", "世芯-KY", "上櫃", 1000)
         ]
         df_fallback = pd.DataFrame(fallback_data, columns=["Code", "Name", "Market", "API_Volume"])
         df_fallback['YF_Ticker'] = df_fallback.apply(lambda row: f"{row['Code']}.TW" if row['Market'] == '上市' else f"{row['Code']}.TWO", axis=1)
@@ -173,6 +189,7 @@ def plot_kline(yf_ticker, stock_name):
 
 
 # ==================== UI 多層次篩選側邊欄 ====================
+
 st.sidebar.header("⚙️ 步驟一：選擇策略方向")
 strategy = st.sidebar.radio("🎯 您目前的交易策略是？", ["做多 (Long)", "放空 (Short)"])
 
@@ -181,6 +198,7 @@ st.sidebar.header("⚙️ 步驟二：第一層流動性過濾")
 hot_filter = st.sidebar.selectbox("🔥 排行榜預篩:", ["🈚 無 (全市場掃描)", "🏆 僅限今日【成交量】 Top 100", "🏆 僅限今日【成交量】 Top 500"])
 min_volume = st.sidebar.number_input("📉 核心成交量門檻 (張數 >):", min_value=0, max_value=50000, value=500, step=100)
 
+# 💡 針對興櫃量能的專屬控制開關
 ignore_emerging_vol = st.sidebar.checkbox("💡 興櫃股票不受此成交量門檻限制", value=True)
 exclude_emerging = st.sidebar.checkbox("🚫 完全排除興櫃股票", value=False)
 
@@ -208,18 +226,21 @@ if st.sidebar.button("🚀 啟動極速掃描", width="stretch"):
     if not selected_patterns:
         st.sidebar.error("請至少選擇一個技術形態！")
     else:
-        with st.spinner("啟動 Polars 全域矩陣引擎 (True Vectorization)..."):
+        with st.spinner("啟動 Polars 極速矩陣引擎..."):
             df_all = fetch_all_markets()
             
             if not df_all.empty:
                 df_filtered = df_all.copy()
                 
+                # 💡 處理興櫃排除邏輯
                 if exclude_emerging:
                     df_filtered = df_filtered[df_filtered['Market'] != '興櫃']
                 
+                # 第一階段：官方量能預過濾
                 if "Top 500" in hot_filter: df_filtered = df_filtered.nlargest(500, 'API_Volume')
                 elif "Top 100" in hot_filter: df_filtered = df_filtered.nlargest(100, 'API_Volume')
                 
+                # 💡 處理興櫃成交量特例：若打勾，興櫃股票將無視 min_volume 門檻
                 if ignore_emerging_vol:
                     df_filtered = df_filtered[(df_filtered['API_Volume'] >= min_volume) | (df_filtered['Market'] == '興櫃')]
                 else:
@@ -235,125 +256,124 @@ if st.sidebar.button("🚀 啟動極速掃描", width="stretch"):
                 progress_bar.info(f"📡 已淘汰低量股，正在從 Yahoo 獲取 {remaining_count} 檔精準歷史資料...")
 
                 try:
-                    # 一次性向 Yahoo 要全部資料
-                    batch_df = yf.download(tickers_list, period="3mo", progress=False)
+                    # Polars 優化：批量下載後轉為 DataFrame
+                    batch_df = yf.download(tickers_list, period="3mo", group_by="ticker", progress=False)
                 except Exception as e:
                     st.error(f"⚠️ Yahoo Finance 批次連線失敗: {e}")
                     st.stop()
 
-                if batch_df.empty:
-                    st.warning("Yahoo API 回傳空資料，請稍後再試。")
-                    st.stop()
-
-                # 💡💡【核彈級提速 1】將 MultiIndex 攤平為長表格 (Long Format)
-                if isinstance(batch_df.columns, pd.MultiIndex):
-                    stacked_df = batch_df.stack(level=1, future_stack=True).rename_axis(['Date', 'Ticker']).reset_index()
-                else:
-                    stacked_df = batch_df.reset_index()
-                    stacked_df['Ticker'] = tickers_list[0]
-                
-                # 剔除沒有收盤價的空資料
-                stacked_df = stacked_df.dropna(subset=['Close'])
-
-                # 💡💡【核彈級提速 2】將整張大表送入 Polars，使用 Window Function (.over) 同時計算全市場的均線
-                pl_df = pl.from_pandas(stacked_df)
-                pl_df = pl_df.sort(["Ticker", "Date"]).with_columns([
-                    pl.col("Close").rolling_mean(window_size=5).over("Ticker").alias("5MA"),
-                    pl.col("Close").rolling_mean(window_size=10).over("Ticker").alias("10MA"),
-                    pl.col("Close").rolling_mean(window_size=20).over("Ticker").alias("20MA"),
-                    pl.col("Close").rolling_mean(window_size=30).over("Ticker").alias("30MA"),
-                    pl.col("Close").rolling_mean(window_size=50).over("Ticker").alias("50MA")
-                ]).drop_nulls()
-
-                # 取出每檔股票最後兩天的數據 (用於判斷今天的狀態與昨天的交叉)
-                latest_2days = pl_df.group_by("Ticker").tail(2).to_pandas()
-
-                # 建立 Meta 字典，以 O(1) 速度查詢基本資料
-                meta_dict = df_filtered.set_index('YF_Ticker').to_dict('index')
                 results = []
-
-                # 💡💡【核彈級提速 3】此時只剩下極小的兩天數據表，迴圈判斷會在毫秒間完成
-                for ticker, group in latest_2days.groupby('Ticker'):
-                    if len(group) < 2: continue
+                
+                for _, row in df_filtered.iterrows():
+                    ticker = row['YF_Ticker']
+                    name = row['Name']
+                    code = row['Code']
+                    market = row.get('Market', '未知')
                     
-                    meta = meta_dict.get(ticker)
-                    if not meta: continue
-
-                    yesterday = group.iloc[0]
-                    today = group.iloc[1]
-                    
-                    # 抓取技術數據
-                    c, o = today["Close"], today["Open"]
-                    l = today["Low"]
-                    ma5_today, ma10_today = today["5MA"], today["10MA"]
-                    ma20_today, ma30_today, ma50_today = today["20MA"], today["30MA"], today["50MA"]
-                    ma5_yesterday = yesterday["5MA"]
-
-                    matched_tags = []
-                    if strategy == "做多 (Long)":
-                        is_bullish = ma5_today > ma10_today > ma20_today > ma30_today > ma50_today
-                        is_red = c > o
-                        is_ma5_not_desc = ma5_today >= ma5_yesterday
-                        is_crossing_up = yesterday["Close"] <= ma5_yesterday or l <= ma5_today
-                        body = c - o
-                        is_half = ((c - max(o, ma5_today)) / body >= 0.50 if body > 0 else False)
+                    try:
+                        # 處理 Yahoo 格式
+                        if len(tickers_list) == 1:
+                            sub_df = batch_df.copy()
+                        else:
+                            if isinstance(batch_df.columns, pd.MultiIndex):
+                                if ticker in batch_df.columns.levels[0]:
+                                    sub_df = batch_df[ticker].dropna(subset=['Close'])
+                                else: continue
+                            else:
+                                sub_df = batch_df.dropna(subset=['Close'])
+                                
+                        if sub_df.empty or len(sub_df) < 15: continue
                         
-                        if "🔥 下半身紅K" in selected_patterns and is_red and is_ma5_not_desc and is_crossing_up and is_half:
-                            matched_tags.append("🔥 下半身紅K")
-                        if "⭐ 五線多頭" in selected_patterns and is_bullish:
-                            matched_tags.append("⭐ 五線多頭")
-                        if "⚡ 交叉拉回" in selected_patterns and is_red and c > ma5_today and yesterday["Close"] <= ma5_yesterday:
-                            matched_tags.append("⚡ 交叉拉回")
-
-                    elif strategy == "放空 (Short)":
-                        is_bearish = ma5_today < ma10_today < ma20_today < ma30_today < ma50_today
-                        is_black = c < o
-                        is_ma5_not_asc = ma5_today <= ma5_yesterday
-                        is_breaking_down = yesterday["Close"] >= ma5_yesterday and c < ma5_today
+                        # 轉換為 Polars 進行高速向量化運算
+                        pl_df = pl.from_pandas(sub_df.reset_index())
                         
-                        if "🔥 破線黑K" in selected_patterns and is_black and is_ma5_not_asc and is_breaking_down:
-                            matched_tags.append("🔥 破線黑K")
-                        if "⭐ 五線空頭" in selected_patterns and is_bearish:
-                            matched_tags.append("⭐ 五線空頭")
+                        pl_df = pl_df.with_columns([
+                            pl.col("Close").rolling_mean(window_size=5).alias("5MA"),
+                            pl.col("Close").rolling_mean(window_size=10).alias("10MA"),
+                            pl.col("Close").rolling_mean(window_size=20).alias("20MA"),
+                            pl.col("Close").rolling_mean(window_size=30).alias("30MA"),
+                            pl.col("Close").rolling_mean(window_size=50).alias("50MA")
+                        ]).drop_nulls()
+                        
+                        if pl_df.height < 2: continue
 
-                    if not matched_tags: continue
-                    
-                    code = meta['Code']
-                    market = meta['Market']
-                    
-                    # 處理籌碼面
-                    f_consec = calculate_consecutive_days(get_mock_institutional_data(code, "foreign"))
-                    t_consec = calculate_consecutive_days(get_mock_institutional_data(code, "trust"))
+                        # 取得最新兩筆資料
+                        today = pl_df.tail(1).to_dicts()[0]
+                        yesterday = pl_df.tail(2).head(1).to_dicts()[0]
 
-                    if strategy == "做多 (Long)":
-                        if min_foreign_days > 0 and f_consec < min_foreign_days: continue
-                        if min_trust_days > 0 and t_consec < min_trust_days: continue
-                    else:
-                        if min_foreign_days > 0 and f_consec > -min_foreign_days: continue
-                        if min_trust_days > 0 and t_consec > -min_trust_days: continue
+                        # --- 技術形態判斷 (Polars 版本) ---
+                        c, o = today["Close"], today["Open"]
+                        l = today["Low"]
+                        ma5_today, ma10_today = today["5MA"], today["10MA"]
+                        ma5_yesterday = yesterday["5MA"]
+                        
+                        matched_tags = []
+                        if strategy == "做多 (Long)":
+                            is_bullish = today["5MA"] > today["10MA"] > today["20MA"] > today["30MA"] > today["50MA"]
+                            is_red = c > o
+                            is_ma5_not_desc = ma5_today >= ma5_yesterday
+                            is_crossing_up = yesterday["Close"] <= ma5_yesterday or l <= ma5_today
+                            body = c - o
+                            is_half = ((c - max(o, ma5_today)) / body >= 0.50 if body > 0 else False)
+                            
+                            if "🔥 下半身紅K" in selected_patterns and is_red and is_ma5_not_desc and is_crossing_up and is_half:
+                                matched_tags.append("🔥 下半身紅K")
+                            if "⭐ 五線多頭" in selected_patterns and is_bullish:
+                                matched_tags.append("⭐ 五線多頭")
+                            if "⚡ 交叉拉回" in selected_patterns and is_red and c > ma5_today and yesterday["Close"] <= ma5_yesterday:
+                                matched_tags.append("⚡ 交叉拉回")
 
-                    # 處理最終成交量 (防護 Yahoo 的 0 漏洞與興櫃邏輯)
-                    y_vol = int(today.get('Volume', 0) / 1000)
-                    if market == '興櫃':
-                        volume_sheets = int(meta['API_Volume'])
-                    else:
-                        volume_sheets = y_vol if y_vol > 0 else int(meta['API_Volume'])
+                        elif strategy == "放空 (Short)":
+                            is_bearish = today["5MA"] < today["10MA"] < today["20MA"] < today["30MA"] < today["50MA"]
+                            is_black = c < o
+                            is_ma5_not_asc = ma5_today <= ma5_yesterday
+                            is_breaking_down = yesterday["Close"] >= ma5_yesterday and c < ma5_today
+                            
+                            if "🔥 破線黑K" in selected_patterns and is_black and is_ma5_not_asc and is_breaking_down:
+                                matched_tags.append("🔥 破線黑K")
+                            if "⭐ 五線空頭" in selected_patterns and is_bearish:
+                                matched_tags.append("⭐ 五線空頭")
 
-                    results.append({
-                        "市場": market,
-                        "代碼": code, 
-                        "YF_Ticker": ticker,
-                        "股票名稱": meta['Name'], 
-                        "收盤價": round(c, 2),
-                        "今日成交量(張)": volume_sheets, 
-                        "外資連動天數": int(f_consec), 
-                        "投信連動天數": int(t_consec), 
-                        "技術型態訊號": " | ".join(matched_tags)
-                    })
+                        if not matched_tags: continue
+                        pattern_name = " | ".join(matched_tags)
+                        
+                        # --- 籌碼面與成交量處理 ---
+                        y_vol = int(today.get('Volume', 0) / 1000)
+                        
+                        # 興櫃股票強制使用官方量
+                        if market == '興櫃':
+                            volume_sheets = int(row['API_Volume'])
+                        else:
+                            volume_sheets = y_vol if y_vol > 0 else int(row['API_Volume'])
+                        
+                        f_consec = calculate_consecutive_days(get_mock_institutional_data(code, "foreign"))
+                        t_consec = calculate_consecutive_days(get_mock_institutional_data(code, "trust"))
+
+                        if strategy == "做多 (Long)":
+                            if min_foreign_days > 0 and f_consec < min_foreign_days: continue
+                            if min_trust_days > 0 and t_consec < min_trust_days: continue
+                        else:
+                            if min_foreign_days > 0 and f_consec > -min_foreign_days: continue
+                            if min_trust_days > 0 and t_consec > -min_trust_days: continue
+                            
+                        results.append({
+                            "市場": market,
+                            "代碼": code, 
+                            "YF_Ticker": ticker,
+                            "股票名稱": name, 
+                            "收盤價": round(c, 2),
+                            "今日成交量(張)": volume_sheets, 
+                            "外資連動天數": int(f_consec), 
+                            "投信連動天數": int(t_consec), 
+                            "技術型態訊號": pattern_name
+                        })
+                    except Exception as loop_e:
+                        continue
 
                 if results:
                     df_final = pd.DataFrame(results).sort_values(by="今日成交量(張)", ascending=False)
                     
+                    # 💡 最後一關把關：依據 UI 設定決定最終顯示清單是否要卡興櫃的成交量
                     if ignore_emerging_vol:
                         df_final = df_final[(df_final['今日成交量(張)'] >= min_volume) | (df_final['市場'] == '興櫃')]
                     else:
