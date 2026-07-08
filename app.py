@@ -10,7 +10,7 @@ import random
 # ==================== App 介面設定 ====================
 st.set_page_config(page_title="台股多空雙向轉折選股系統", page_icon="🔥", layout="wide")
 st.title("🔥 台股多空雙向綜合選股系統")
-st.markdown("**(多層次漏斗篩選：Yahoo即時流動性 ➔ 技術形態 ➔ 籌碼面)**")
+st.markdown("**(多層次漏斗篩選：極速流動性 ➔ Yahoo即時量 ➔ 技術形態 ➔ 籌碼面)**")
 st.markdown("---")
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
@@ -26,6 +26,8 @@ def fetch_all_markets():
             df_twse = pd.DataFrame(res_twse.json())
             df_twse['Market'] = '上市'
             df_twse['YF_Ticker'] = df_twse['Code'] + '.TW'
+            # 預先處理證交所的官方成交量，用於極速預過濾
+            df_twse['API_Volume'] = df_twse['TradingVolume'].apply(lambda x: float(str(x).replace(',', '')) / 1000 if x else 0)
             dfs.append(df_twse)
     except: pass
 
@@ -36,6 +38,8 @@ def fetch_all_markets():
             df_tpex = df_tpex.rename(columns={'SecuritiesCompanyCode': 'Code', 'CompanyName': 'Name'})
             df_tpex['Market'] = '上櫃'
             df_tpex['YF_Ticker'] = df_tpex['Code'] + '.TWO'
+            # 預先處理上櫃官方成交量
+            df_tpex['API_Volume'] = df_tpex['TradingVolume'].apply(lambda x: float(str(x).replace(',', '')) if x else 0)
             dfs.append(df_tpex)
     except: pass
 
@@ -45,10 +49,6 @@ def fetch_all_markets():
         df_all = df_all[df_all['Code'].apply(lambda x: len(x) >= 4 and x[:4].isdigit())]
         return df_all
     return pd.DataFrame()
-
-def parse_number(val_str):
-    try: return float(str(val_str).replace(',', ''))
-    except: return 0
 
 def calculate_consecutive_days(net_buy_sell_list):
     if not net_buy_sell_list: return 0
@@ -158,7 +158,6 @@ def analyze_stock(stock_info, strategy, selected_patterns):
 
         if is_match:
             return {
-                # 💡 完美修正：直接用點(.)切開，取第一段的純數字，不會再跑出 O 了！
                 "代碼": ticker.split(".")[0], 
                 "YF_Ticker": ticker,
                 "股票名稱": stock_name, 
@@ -263,16 +262,35 @@ if 'scan_completed' not in st.session_state:
     st.session_state.scan_completed = False
     st.session_state.df_final = pd.DataFrame()
 
-if st.sidebar.button("🚀 啟多層次精密掃描", width="stretch"):
+if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
     if not selected_patterns:
         st.sidebar.error("請至少選擇一個技術形態！")
     else:
-        with st.spinner("正在執行漏斗式多維度交叉過濾 (📡 正在向 Yahoo 請求全市場即時成交量)..."):
+        with st.spinner("正在執行漏斗式多維度過濾..."):
             df_all = fetch_all_markets()
             
             if not df_all.empty:
                 df_filtered = df_all.copy()
                 
+                # 💡 💡 終極優化：【第一關：政府API超高速預篩選】 💡 💡
+                # 很多股票一天成交只有幾張，在這裡先用政府資料直接拍掉，不送去給 Yahoo
+                if "Top 500" in hot_filter: df_filtered = df_filtered.nlargest(500, 'API_Volume')
+                elif "Top 100" in hot_filter: df_filtered = df_filtered.nlargest(100, 'API_Volume')
+                
+                # 即便選「無預篩」，也可以把成交量低於門檻的 1000 多檔股票直接刪除
+                df_filtered = df_filtered[df_filtered['API_Volume'] >= min_volume]
+                
+                # 算一下剩下多少股票需要送 Yahoo
+                remaining_count = len(df_filtered)
+                if remaining_count == 0:
+                    st.warning("⚠️ 第一關成交量篩選後已無符合股票，請放寬量能門檻！")
+                    st.stop()
+                    
+                # 提示使用者目前被縮小、最佳化後的池子大小
+                progress_bar = st.empty()
+                progress_bar.info(f"📡 觸發智慧加速：已成功淘汰千檔低量股！僅送出 【{remaining_count}檔】 精英股向 Yahoo 請求即時量...")
+
+                # --- 核心：這時候下載的代碼清單已經從 1700 縮小到 200 檔左右了，速度極快 ---
                 try:
                     tickers_list = df_filtered['YF_Ticker'].tolist()
                     yf_vols = yf.download(tickers_list, period="1d", progress=False)['Volume']
@@ -288,6 +306,7 @@ if st.sidebar.button("🚀 啟多層次精密掃描", width="stretch"):
                     st.error("⚠️ 無法獲取 Yahoo 即時成交量，請稍後再試。")
                     st.stop()
 
+                # 籌碼面計算與過濾
                 df_filtered['Foreign_Days'] = df_filtered['Code'].apply(lambda x: calculate_consecutive_days(get_mock_institutional_data(x, "foreign")))
                 df_filtered['Trust_Days'] = df_filtered['Code'].apply(lambda x: calculate_consecutive_days(get_mock_institutional_data(x, "trust")))
 
@@ -298,11 +317,8 @@ if st.sidebar.button("🚀 啟多層次精密掃描", width="stretch"):
                     if min_foreign_days > 0: df_filtered = df_filtered[df_filtered['Foreign_Days'] <= -min_foreign_days]
                     if min_trust_days > 0: df_filtered = df_filtered[df_filtered['Trust_Days'] <= -min_trust_days]
 
-                if "Top 500" in hot_filter: df_filtered = df_filtered.nlargest(500, 'Volume_Sheets')
-                elif "Top 100" in hot_filter: df_filtered = df_filtered.nlargest(100, 'Volume_Sheets')
-                df_filtered = df_filtered[df_filtered['Volume_Sheets'] >= min_volume]
-
-                st.info(f"✅ 即時流動性與籌碼過濾完畢，共 **{len(df_filtered)}** 檔股票進入技術形態掃描...")
+                # 經過籌碼面後的最終技術面掃描池
+                progress_bar.info(f"✅ 即時流動性與籌碼過濾完畢，剩餘 **{len(df_filtered)}** 檔精選標的進入技術形態掃描...")
 
                 active_pool = [
                     (row['YF_Ticker'], row['Name'], row['Volume_Sheets'], row['Foreign_Days'], row['Trust_Days']) 
@@ -324,6 +340,7 @@ if st.sidebar.button("🚀 啟多層次精密掃描", width="stretch"):
                 else:
                     st.session_state.df_final = pd.DataFrame()
                     st.session_state.scan_completed = True
+                progress_bar.empty() # 清除進度文字
             else:
                 st.error("⚠️ 無法獲取台股代碼清單，請稍後再試。")
                 st.session_state.scan_completed = False
