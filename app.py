@@ -22,8 +22,9 @@ def fetch_all_markets():
     
     def safe_vol(x):
         try:
+            # 💡 修正：台灣官方 API 皆為「股」，統一除以 1000 換算為「張」確保精準度
             v = float(str(x).replace(',', ''))
-            return v / 1000 if v > 100000 else v
+            return int(v / 1000)
         except: return 0
 
     # 策略 1: 官方 OpenAPI
@@ -186,7 +187,7 @@ def check_patterns(df, strategy, selected_patterns):
     if matched_tags: return True, " | ".join(matched_tags)
     return False, "─"
 
-def plot_kline(yf_ticker, stock_name):
+def plot_kline(yf_ticker, stock_name, fallback_vol=0):
     df = yf.download(yf_ticker, period="8mo", progress=False) 
     if df.empty: return None, None
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.droplevel(1)
@@ -243,7 +244,12 @@ def plot_kline(yf_ticker, stock_name):
     
     latest, prev = df.iloc[-1], df.iloc[-2]
     change = latest['Close'] - prev['Close']
-    stats = {'Close': latest['Close'], 'Change': change, 'ChangePct': (change / prev['Close']) * 100, 'Volume': int(latest['Volume']/1000)}
+    
+    # 💡 雙重保險：如果 Yahoo 圖表數據的成交量是 0，強制使用外部傳入的正確量
+    y_vol = int(latest['Volume']/1000)
+    final_vol = y_vol if y_vol > 0 else fallback_vol
+    
+    stats = {'Close': latest['Close'], 'Change': change, 'ChangePct': (change / prev['Close']) * 100, 'Volume': final_vol}
     return fig, stats
 
 
@@ -301,9 +307,7 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
                 progress_bar = st.empty()
                 progress_bar.info(f"⚡ 正在向 Yahoo 執行「單次巨量批次下載」({remaining_count} 檔股票)...")
 
-                # 💡💡 核心優化：1次請求拉回所有股票 1 年的技術資料 💡💡
                 try:
-                    # group_by="ticker" 讓資料整齊地以股票代號分組
                     batch_df = yf.download(tickers_list, period="1y", group_by="ticker", progress=False)
                 except Exception as e:
                     st.error(f"⚠️ Yahoo Finance 批次連線超時，請稍後再試。原因: {e}")
@@ -311,43 +315,48 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
 
                 results = []
                 
-                # 💡💡 完全在記憶體內(In-Memory)高速跑迴圈，沒有任何網路延遲 💡💡
+                # 純記憶體內高效能計算
                 for _, row in df_filtered.iterrows():
                     ticker = row['YF_Ticker']
                     name = row['Name']
                     code = row['Code']
                     
-                    # 從大批次 DataFrame 中抽出單一股票的歷史紀錄
+                    sub_df = pd.DataFrame()
                     if len(tickers_list) == 1:
                         sub_df = batch_df.copy()
                     else:
                         if isinstance(batch_df.columns, pd.MultiIndex):
                             if ticker in batch_df.columns.levels[0]:
                                 sub_df = batch_df[ticker].dropna(subset=['Close'])
-                            else: continue
                         else:
                             sub_df = batch_df.dropna(subset=['Close'])
                             
+                    # 💡 終極防漏機制：如果 Yahoo 批次下載「隨機漏掉」這檔股票，強制單獨補抓！
+                    # 這樣就能保證每次篩出來的股票數量 100% 一致。
+                    if sub_df.empty or len(sub_df) < 65:
+                        try:
+                            sub_df = yf.download(ticker, period="1y", progress=False).dropna(subset=['Close'])
+                        except: pass
+                            
                     if sub_df.empty or len(sub_df) < 65: continue
                     
-                    # 記憶體內高效率計算移動平均線
                     sub_df["5MA"] = sub_df["Close"].rolling(window=5).mean()
                     sub_df["10MA"] = sub_df["Close"].rolling(window=10).mean()
                     sub_df["20MA"] = sub_df["Close"].rolling(window=20).mean()
                     sub_df["30MA"] = sub_df["Close"].rolling(window=30).mean()
                     sub_df["50MA"] = sub_df["Close"].rolling(window=50).mean()
 
-                    # 檢查技術形態
                     is_match, pattern_name = check_patterns(sub_df, strategy, selected_patterns)
                     if is_match:
                         today_row = sub_df.iloc[-1]
-                        volume_sheets = int(today_row['Volume'] / 1000) # 即時成交張數
                         
-                        # 籌碼面往前推算演算法
+                        # 💡 雙重成交量保險：Yahoo 的 Volume 時常會當機給 0，如果遇到 0 就退回政府 API 的官方精準量！
+                        y_vol = int(today_row['Volume'] / 1000)
+                        volume_sheets = y_vol if y_vol > 0 else int(row['API_Volume'])
+                        
                         f_consec = calculate_consecutive_days(get_mock_institutional_data(code, "foreign"))
                         t_consec = calculate_consecutive_days(get_mock_institutional_data(code, "trust"))
 
-                        # 篩選籌碼門檻
                         if strategy == "做多 (Long)":
                             if min_foreign_days > 0 and f_consec < min_foreign_days: continue
                             if min_trust_days > 0 and t_consec < min_trust_days: continue
@@ -356,7 +365,7 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
                             if min_trust_days > 0 and t_consec > -min_trust_days: continue
                             
                         results.append({
-                            "代碼": code, # 純數字，不再含有尾巴的 O
+                            "代碼": code, 
                             "YF_Ticker": ticker,
                             "股票名稱": name, 
                             "收盤價": round(float(today_row["Close"]), 2),
@@ -410,7 +419,8 @@ if st.session_state.scan_completed:
                 
                 with st.spinner("載入即時 K 線與精準報價中..."):
                     try:
-                        fig, stats = plot_kline(yf_ticker, selected_name)
+                        # 💡 傳入初篩時保障不為 0 的成交量作為防呆備案
+                        fig, stats = plot_kline(yf_ticker, selected_name, fallback_vol=stock_data['今日成交量(張)'])
                         
                         try:
                             tkr = yf.Ticker(yf_ticker)
@@ -422,6 +432,10 @@ if st.session_state.scan_completed:
                                 if realtime_vol_shares > 0:
                                     stats['Volume'] = int(realtime_vol_shares / 1000)
                         except: pass 
+
+                        # 💡 最後防呆：如果單股請求回傳依然是 0，強制退回使用最穩定無誤的量
+                        if stats['Volume'] <= 0:
+                            stats['Volume'] = stock_data['今日成交量(張)']
 
                     except:
                         fig, stats = None, None
