@@ -84,7 +84,7 @@ def fetch_all_markets():
                 df = df.rename(columns={'stock_id': 'Code', 'stock_name': 'Name'})
                 df['Market'] = df['type'].apply(lambda x: '上市' if 'twse' in str(x).lower() else '上櫃')
                 df['YF_Ticker'] = df.apply(lambda row: f"{row['Code']}.TW" if row['Market'] == '上市' else f"{row['Code']}.TWO", axis=1)
-                df['API_Volume'] = 999999  # 強制給大成交量，讓後續交給 Yahoo API 負責過濾
+                df['API_Volume'] = 999999  
                 dfs.append(df)
         except: pass
 
@@ -321,6 +321,7 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
                 if "Top 500" in hot_filter: df_filtered = df_filtered.nlargest(500, 'API_Volume')
                 elif "Top 100" in hot_filter: df_filtered = df_filtered.nlargest(100, 'API_Volume')
                 
+                # 第一階段過濾
                 df_filtered = df_filtered[df_filtered['API_Volume'] >= min_volume]
                 
                 remaining_count = len(df_filtered)
@@ -331,19 +332,36 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
                 progress_bar = st.empty()
                 progress_bar.info(f"📡 已成功淘汰千檔低量股！僅送出 【{remaining_count}檔】 精英股向 Yahoo 請求即時量...")
 
+                # 💡【核心修正】雙重防呆與退回機制
                 try:
                     tickers_list = df_filtered['YF_Ticker'].tolist()
-                    yf_vols = yf.download(tickers_list, period="1d", progress=False)['Volume']
+                    yf_data = yf.download(tickers_list, period="1d", progress=False)
                     
-                    if isinstance(yf_vols, pd.Series): 
-                        latest_vols = {tickers_list[0]: yf_vols.iloc[-1]}
-                    else:
-                        latest_vols = yf_vols.iloc[-1]
+                    if not yf_data.empty and 'Volume' in yf_data:
+                        vols = yf_data['Volume'].iloc[-1]
+                        if isinstance(vols, pd.Series): 
+                            vol_dict = vols.to_dict()
+                        else:
+                            vol_dict = {tickers_list[0]: vols}
+                            
+                        # 計算 Yahoo 即時量
+                        df_filtered['Yahoo_Vol'] = df_filtered['YF_Ticker'].map(vol_dict) / 1000
                         
-                    df_filtered['Volume_Sheets'] = df_filtered['YF_Ticker'].map(latest_vols) / 1000
-                    df_filtered['Volume_Sheets'] = df_filtered['Volume_Sheets'].fillna(0).astype(int)
+                        # 關鍵：如果 Yahoo 量為空或 0，強制使用官方 API 量，防止幽靈 0 量出現！
+                        df_filtered['Volume_Sheets'] = df_filtered.apply(
+                            lambda row: row['Yahoo_Vol'] if pd.notna(row['Yahoo_Vol']) and row['Yahoo_Vol'] > 0 else row['API_Volume'], 
+                            axis=1
+                        ).astype(int)
+                    else:
+                        df_filtered['Volume_Sheets'] = df_filtered['API_Volume'].astype(int)
                 except Exception as e:
-                    st.error("⚠️ 無法獲取 Yahoo 即時成交量，請稍後再試。")
+                    df_filtered['Volume_Sheets'] = df_filtered['API_Volume'].astype(int)
+
+                # 💡【二次過濾】確保最終 Volume_Sheets 大於設定的門檻
+                df_filtered = df_filtered[df_filtered['Volume_Sheets'] >= min_volume]
+                
+                if df_filtered.empty:
+                    st.warning("⚠️ 最終成交量過濾後無符合標的，請放寬門檻再試一次！")
                     st.stop()
 
                 df_filtered['Foreign_Days'] = df_filtered['Code'].apply(lambda x: calculate_consecutive_days(get_mock_institutional_data(x, "foreign")))
