@@ -166,7 +166,7 @@ def check_patterns(df, strategy, selected_patterns):
 
         is_ma5_not_ascending = ma5_today <= ma5_yesterday
         is_breaking_down = yesterday["Close"] >= ma5_yesterday and c < ma5_today
-        if "🔥 破線黑K" in selected_patterns && is_black_candle and is_ma5_not_ascending and is_breaking_down:
+        if "🔥 破線黑K" in selected_patterns and is_black_candle and is_ma5_not_ascending and is_breaking_down:
             matched_tags.append("🔥 破線黑K")
 
         had_dead_cross = any(h_ma5[i - 1] >= h_ma10[i - 1] and h_ma5[i] < h_ma10[i] for i in range(1, len(h_ma5) - 1))
