@@ -13,40 +13,86 @@ st.title("🔥 台股多空雙向綜合選股系統")
 st.markdown("**(多層次漏斗篩選：極速流動性 ➔ Yahoo即時量 ➔ 技術形態 ➔ 籌碼面)**")
 st.markdown("---")
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-
 # ==================== 核心數據獲取與籌碼演算法 ====================
 @st.cache_data(ttl=3600)
 def fetch_all_markets():
-    """抓取上市與上櫃資料，並自動配置正確的 Yahoo 股票代號"""
+    """多重備援架構：抓取上市與上櫃資料，突破雲端 IP 封鎖"""
     dfs = []
+    HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
+    def safe_vol(x):
+        try:
+            v = float(str(x).replace(',', ''))
+            return v / 1000 if v > 100000 else v
+        except: return 0
+
+    # --- 策略 1: 官方 OpenAPI ---
     try:
-        res_twse = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=HEADERS, timeout=10)
-        if res_twse.status_code == 200:
-            df_twse = pd.DataFrame(res_twse.json())
-            df_twse['Market'] = '上市'
-            df_twse['YF_Ticker'] = df_twse['Code'] + '.TW'
-            # 預先處理證交所的官方成交量，用於極速預過濾
-            df_twse['API_Volume'] = df_twse['TradingVolume'].apply(lambda x: float(str(x).replace(',', '')) / 1000 if x else 0)
-            dfs.append(df_twse)
+        res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=HEADERS, timeout=5)
+        if res.status_code == 200:
+            df = pd.DataFrame(res.json())
+            df['Market'] = '上市'
+            df['YF_Ticker'] = df['Code'] + '.TW'
+            df['API_Volume'] = df['TradingVolume'].apply(safe_vol)
+            dfs.append(df)
     except: pass
 
     try:
-        res_tpex = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=HEADERS, timeout=10)
-        if res_tpex.status_code == 200:
-            df_tpex = pd.DataFrame(res_tpex.json())
-            df_tpex = df_tpex.rename(columns={'SecuritiesCompanyCode': 'Code', 'CompanyName': 'Name'})
-            df_tpex['Market'] = '上櫃'
-            df_tpex['YF_Ticker'] = df_tpex['Code'] + '.TWO'
-            # 預先處理上櫃官方成交量
-            df_tpex['API_Volume'] = df_tpex['TradingVolume'].apply(lambda x: float(str(x).replace(',', '')) if x else 0)
-            dfs.append(df_tpex)
+        res = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=HEADERS, timeout=5)
+        if res.status_code == 200:
+            df = pd.DataFrame(res.json())
+            df = df.rename(columns={'SecuritiesCompanyCode': 'Code', 'CompanyName': 'Name'})
+            df['Market'] = '上櫃'
+            df['YF_Ticker'] = df['Code'] + '.TWO'
+            df['API_Volume'] = df['TradingVolume'].apply(safe_vol)
+            dfs.append(df)
     except: pass
+
+    # --- 策略 2: 官方主網頁 API (若 OpenAPI 封鎖雲端 IP) ---
+    if not dfs:
+        try:
+            res = requests.get("https://www.twse.com.tw/exchangeReport/STOCK_DAY_ALL?response=json", headers=HEADERS, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                df = pd.DataFrame(data['data'], columns=data['fields'])
+                df = df.rename(columns={'證券代碼': 'Code', '證券名稱': 'Name', '成交股數': 'TradingVolume'})
+                df['Market'] = '上市'
+                df['YF_Ticker'] = df['Code'] + '.TW'
+                df['API_Volume'] = df['TradingVolume'].apply(safe_vol)
+                dfs.append(df)
+        except: pass
+        
+        try:
+            res = requests.get("https://www.tpex.org.tw/web/stock/aftertrading/OTCEC/OTCEC_result.php?l=zh-tw&o=json", headers=HEADERS, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                df = pd.DataFrame(data['aaData'])
+                df = df.rename(columns={0: 'Code', 1: 'Name', 7: 'TradingVolume'})
+                df['Market'] = '上櫃'
+                df['YF_Ticker'] = df['Code'] + '.TWO'
+                df['API_Volume'] = df['TradingVolume'].apply(safe_vol)
+                dfs.append(df)
+        except: pass
+
+    # --- 策略 3: 民間開源 API (FinMind) 終極備用 ---
+    if not dfs:
+        try:
+            res = requests.get("https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo", headers=HEADERS, timeout=8)
+            if res.status_code == 200:
+                df = pd.DataFrame(res.json()['data'])
+                df = df[df['stock_id'].apply(lambda x: len(str(x)) == 4 and str(x).isdigit())]
+                df = df.rename(columns={'stock_id': 'Code', 'stock_name': 'Name'})
+                df['Market'] = df['type'].apply(lambda x: '上市' if 'twse' in str(x).lower() else '上櫃')
+                df['YF_Ticker'] = df.apply(lambda row: f"{row['Code']}.TW" if row['Market'] == '上市' else f"{row['Code']}.TWO", axis=1)
+                df['API_Volume'] = 999999  # 強制給大成交量，讓後續交給 Yahoo API 負責過濾
+                dfs.append(df)
+        except: pass
 
     if dfs:
         df_all = pd.concat(dfs, ignore_index=True)
         df_all['Code'] = df_all['Code'].astype(str)
-        df_all = df_all[df_all['Code'].apply(lambda x: len(x) >= 4 and x[:4].isdigit())]
+        df_all = df_all[df_all['Code'].apply(lambda x: len(x) == 4 and x.isdigit())]
+        df_all = df_all.drop_duplicates(subset=['YF_Ticker'])
         return df_all
     return pd.DataFrame()
 
@@ -272,25 +318,19 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
             if not df_all.empty:
                 df_filtered = df_all.copy()
                 
-                # 💡 💡 終極優化：【第一關：政府API超高速預篩選】 💡 💡
-                # 很多股票一天成交只有幾張，在這裡先用政府資料直接拍掉，不送去給 Yahoo
                 if "Top 500" in hot_filter: df_filtered = df_filtered.nlargest(500, 'API_Volume')
                 elif "Top 100" in hot_filter: df_filtered = df_filtered.nlargest(100, 'API_Volume')
                 
-                # 即便選「無預篩」，也可以把成交量低於門檻的 1000 多檔股票直接刪除
                 df_filtered = df_filtered[df_filtered['API_Volume'] >= min_volume]
                 
-                # 算一下剩下多少股票需要送 Yahoo
                 remaining_count = len(df_filtered)
                 if remaining_count == 0:
                     st.warning("⚠️ 第一關成交量篩選後已無符合股票，請放寬量能門檻！")
                     st.stop()
                     
-                # 提示使用者目前被縮小、最佳化後的池子大小
                 progress_bar = st.empty()
-                progress_bar.info(f"📡 觸發智慧加速：已成功淘汰千檔低量股！僅送出 【{remaining_count}檔】 精英股向 Yahoo 請求即時量...")
+                progress_bar.info(f"📡 已成功淘汰千檔低量股！僅送出 【{remaining_count}檔】 精英股向 Yahoo 請求即時量...")
 
-                # --- 核心：這時候下載的代碼清單已經從 1700 縮小到 200 檔左右了，速度極快 ---
                 try:
                     tickers_list = df_filtered['YF_Ticker'].tolist()
                     yf_vols = yf.download(tickers_list, period="1d", progress=False)['Volume']
@@ -306,7 +346,6 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
                     st.error("⚠️ 無法獲取 Yahoo 即時成交量，請稍後再試。")
                     st.stop()
 
-                # 籌碼面計算與過濾
                 df_filtered['Foreign_Days'] = df_filtered['Code'].apply(lambda x: calculate_consecutive_days(get_mock_institutional_data(x, "foreign")))
                 df_filtered['Trust_Days'] = df_filtered['Code'].apply(lambda x: calculate_consecutive_days(get_mock_institutional_data(x, "trust")))
 
@@ -317,7 +356,6 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
                     if min_foreign_days > 0: df_filtered = df_filtered[df_filtered['Foreign_Days'] <= -min_foreign_days]
                     if min_trust_days > 0: df_filtered = df_filtered[df_filtered['Trust_Days'] <= -min_trust_days]
 
-                # 經過籌碼面後的最終技術面掃描池
                 progress_bar.info(f"✅ 即時流動性與籌碼過濾完畢，剩餘 **{len(df_filtered)}** 檔精選標的進入技術形態掃描...")
 
                 active_pool = [
@@ -340,7 +378,7 @@ if st.sidebar.button("🚀 啟動多層次精密掃描", width="stretch"):
                 else:
                     st.session_state.df_final = pd.DataFrame()
                     st.session_state.scan_completed = True
-                progress_bar.empty() # 清除進度文字
+                progress_bar.empty() 
             else:
                 st.error("⚠️ 無法獲取台股代碼清單，請稍後再試。")
                 st.session_state.scan_completed = False
