@@ -19,45 +19,51 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 # ==================== 核心數據獲取 ====================
 @st.cache_data(ttl=3600)
 def fetch_all_markets():
-    """四重備援架構：抓取上市、上櫃與興櫃資料，並內建靜態清單防當機"""
+    """多重備援架構：抓取上市、上櫃與興櫃資料"""
     dfs = []
     
-    # 💡 修正後的成交量轉換邏輯：官方回傳皆為「股數」，一律除以 1000 轉為「張數」
+    # 💡 終極防呆成交量轉換：強勢處理空值與千分位符號，一律轉為「張數」
     def safe_vol(x):
         try:
+            if pd.isna(x): return 0
             v = float(str(x).replace(',', ''))
             return int(v / 1000)
-        except: return 0
+        except: 
+            return 0
 
-    # --- 策略 1: 官方 OpenAPI ---
+    # --- 策略 1: 官方 OpenAPI (上市) ---
     try:
         res = requests.get("https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL", headers=HEADERS, timeout=5)
         if res.status_code == 200:
             df = pd.DataFrame(res.json())
             df['Market'], df['YF_Ticker'] = '上市', df['Code'] + '.TW'
-            df['API_Volume'] = df['TradingVolume'].apply(safe_vol)
+            # 解決欄位名稱不一致的致命 Bug
+            vol_col = 'TradeVolume' if 'TradeVolume' in df.columns else 'TradingVolume'
+            df['API_Volume'] = df.get(vol_col, 0).apply(safe_vol)
             dfs.append(df)
     except: pass
 
+    # --- 策略 1.1: 官方 OpenAPI (上櫃) ---
     try:
         res = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", headers=HEADERS, timeout=5)
         if res.status_code == 200:
             df = pd.DataFrame(res.json()).rename(columns={'SecuritiesCompanyCode': 'Code', 'CompanyName': 'Name'})
             df['Market'], df['YF_Ticker'] = '上櫃', df['Code'] + '.TWO'
-            df['API_Volume'] = df['TradingVolume'].apply(safe_vol)
+            df['API_Volume'] = df.get('TradingVolume', 0).apply(safe_vol)
             dfs.append(df)
     except: pass
 
+    # --- 策略 1.2: 官方 OpenAPI (興櫃) ---
     try:
         res = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_esb_quotes", headers=HEADERS, timeout=5)
         if res.status_code == 200:
             df = pd.DataFrame(res.json()).rename(columns={'SecuritiesCompanyCode': 'Code', 'CompanyName': 'Name'})
             df['Market'], df['YF_Ticker'] = '興櫃', df['Code'] + '.TWO'
-            df['API_Volume'] = df['TradingVolume'].apply(safe_vol)
+            df['API_Volume'] = df.get('TradingVolume', 0).apply(safe_vol)
             dfs.append(df)
     except: pass
 
-    # --- 策略 2 & 3: 官方主網頁與 FinMind ---
+    # --- 策略 2: 官方主網頁與 FinMind (備援) ---
     if not dfs:
         try:
             res = requests.get("https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo", headers=HEADERS, timeout=8)
@@ -67,43 +73,9 @@ def fetch_all_markets():
                 df = df.rename(columns={'stock_id': 'Code', 'stock_name': 'Name'})
                 df['Market'] = df['type'].apply(lambda x: '上市' if 'twse' in str(x).lower() else '上櫃')
                 df['YF_Ticker'] = df.apply(lambda row: f"{row['Code']}.TW" if row['Market'] == '上市' else f"{row['Code']}.TWO", axis=1)
-                df['API_Volume'] = 999999
+                df['API_Volume'] = 999999 # 假資料標記
                 dfs.append(df)
         except: pass
-
-    # --- 策略 4: 終極靜態備用清單 (若所有 API 皆被封鎖) ---
-    if not dfs:
-        st.toast("⚠️ 雲端網路受限，已自動啟動內建熱門股備用清單！", icon="🛡️")
-        fallback_data = [
-            ("2330", "台積電", "上市", 50000), ("2317", "鴻海", "上市", 40000),
-            ("2454", "鴻準", "上市", 30000), ("2603", "長榮", "上市", 30000),
-            ("3231", "緯創", "上市", 25000), ("2382", "廣達", "上市", 25000),
-            ("2308", "台達電", "上市", 20000), ("2881", "富邦金", "上市", 20000),
-            ("2891", "中信金", "上市", 20000), ("2303", "聯電", "上市", 20000),
-            ("2882", "國泰金", "上市", 15000), ("2886", "兆豐金", "上市", 15000),
-            ("2002", "中鋼", "上市", 15000), ("1301", "台塑", "上市", 10000),
-            ("2412", "中華電", "上市", 10000), ("1216", "統一", "上市", 10000),
-            ("2884", "玉山金", "上市", 10000), ("2609", "陽明", "上市", 10000),
-            ("3034", "聯詠", "上市", 8000), ("3037", "欣興", "上市", 8000),
-            ("3008", "大立光", "上市", 5000), ("2379", "瑞昱", "上市", 5000),
-            ("2615", "萬海", "上市", 5000), ("2885", "元大金", "上市", 5000),
-            ("2880", "華南金", "上市", 5000), ("2892", "第一金", "上市", 5000),
-            ("2883", "開發金", "上市", 5000), ("2887", "台新金", "上市", 5000),
-            ("2357", "華碩", "上市", 5000), ("2324", "仁寶", "上市", 5000),
-            ("8069", "元太", "上櫃", 5000), ("3105", "穩懋", "上市", 5000),
-            ("2345", "智邦", "上櫃", 5000), ("6488", "環球晶", "上櫃", 5000),
-            ("8299", "群聯", "上市", 5000), ("3529", "力旺", "上櫃", 3000),
-            ("5483", "中美晶", "上櫃", 3000), ("5347", "世界", "上櫃", 3000),
-            ("1565", "精華", "上櫃", 2000), ("4966", "譜瑞-KY", "上櫃", 2000),
-            ("3293", "鈊象", "上櫃", 2000), ("8436", "大江", "上櫃", 1000),
-            ("6446", "藥華藥", "上櫃", 1000), ("3131", "弘塑", "上櫃", 1000),
-            ("3533", "嘉澤", "上市", 1000), ("5274", "信驊", "上櫃", 1000),
-            ("6669", "緯穎", "上市", 1000), ("6531", "愛普*", "上櫃", 1000),
-            ("8046", "南電", "上市", 1000), ("3661", "世芯-KY", "上櫃", 1000)
-        ]
-        df_fallback = pd.DataFrame(fallback_data, columns=["Code", "Name", "Market", "API_Volume"])
-        df_fallback['YF_Ticker'] = df_fallback.apply(lambda row: f"{row['Code']}.TW" if row['Market'] == '上市' else f"{row['Code']}.TWO", axis=1)
-        dfs.append(df_fallback)
 
     if dfs:
         df_all = pd.concat(dfs, ignore_index=True)
@@ -236,15 +208,17 @@ if st.sidebar.button("🚀 啟動極速掃描", width="stretch"):
                 if exclude_emerging:
                     df_filtered = df_filtered[df_filtered['Market'] != '興櫃']
                 
-                # 第一階段：官方量能預過濾
-                if "Top 500" in hot_filter: df_filtered = df_filtered.nlargest(500, 'API_Volume')
-                elif "Top 100" in hot_filter: df_filtered = df_filtered.nlargest(100, 'API_Volume')
-                
-                # 💡 處理興櫃成交量特例：若打勾，興櫃股票將無視 min_volume 門檻
+                # 💡 第一階段：官方量能預過濾 (只保留大於門檻的股票)
                 if ignore_emerging_vol:
                     df_filtered = df_filtered[(df_filtered['API_Volume'] >= min_volume) | (df_filtered['Market'] == '興櫃')]
                 else:
                     df_filtered = df_filtered[df_filtered['API_Volume'] >= min_volume]
+                
+                # 💡 排行榜過濾必須在門檻過濾之後執行，才不會因為量大股擠爆榜單而漏掉中小股
+                if "Top 500" in hot_filter: 
+                    df_filtered = df_filtered.nlargest(500, 'API_Volume')
+                elif "Top 100" in hot_filter: 
+                    df_filtered = df_filtered.nlargest(100, 'API_Volume')
                 
                 remaining_count = len(df_filtered)
                 if remaining_count == 0:
@@ -346,6 +320,7 @@ if st.sidebar.button("🚀 啟動極速掃描", width="stretch"):
                         elif market == '興櫃':
                             volume_sheets = int(row['API_Volume'])
                         else:
+                            # 優先取用 Yahoo，若 Yahoo 異常則用官方量
                             volume_sheets = y_vol if y_vol > 0 else int(row['API_Volume'])
                             
                         # 終極防呆：確保最終結果畫面絕對不會印出 999999 假數據
@@ -379,7 +354,7 @@ if st.sidebar.button("🚀 啟動極速掃描", width="stretch"):
                 if results:
                     df_final = pd.DataFrame(results).sort_values(by="今日成交量(張)", ascending=False)
                     
-                    # 💡 最後一關把關：依據 UI 設定決定最終顯示清單是否要卡興櫃的成交量
+                    # 💡 最後雙重把關
                     if ignore_emerging_vol:
                         df_final = df_final[(df_final['今日成交量(張)'] >= min_volume) | (df_final['市場'] == '興櫃')]
                     else:
