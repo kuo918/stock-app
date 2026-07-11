@@ -55,7 +55,7 @@ def fetch_all_markets():
             dfs.append(df)
     except: pass
 
-    # --- 策略 2 & 3: 官方主網頁與 FinMind (略，維持原結構) ---
+    # --- 策略 2 & 3: 官方主網頁與 FinMind ---
     if not dfs:
         try:
             res = requests.get("https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo", headers=HEADERS, timeout=8)
@@ -187,9 +187,7 @@ def plot_kline(yf_ticker, stock_name):
     stats = {'Close': latest['Close'], 'Change': change, 'ChangePct': (change / prev['Close']) * 100, 'Volume': int(latest['Volume']/1000)}
     return fig, stats
 
-
 # ==================== UI 多層次篩選側邊欄 ====================
-
 st.sidebar.header("⚙️ 步驟一：選擇策略方向")
 strategy = st.sidebar.radio("🎯 您目前的交易策略是？", ["做多 (Long)", "放空 (Short)"])
 
@@ -340,11 +338,17 @@ if st.sidebar.button("🚀 啟動極速掃描", width="stretch"):
                         # --- 籌碼面與成交量處理 ---
                         y_vol = int(today.get('Volume', 0) / 1000)
                         
-                        # 興櫃股票強制使用官方量
-                        if market == '興櫃':
+                        # 阻斷假資料：如果是備援策略產生的 999999，強制改用 Yahoo 真實成交量
+                        if row['API_Volume'] == 999999:
+                            volume_sheets = y_vol
+                        elif market == '興櫃':
                             volume_sheets = int(row['API_Volume'])
                         else:
                             volume_sheets = y_vol if y_vol > 0 else int(row['API_Volume'])
+                            
+                        # 終極防呆：確保最終結果畫面絕對不會印出 999999 假數據
+                        if volume_sheets == 999999:
+                            volume_sheets = y_vol
                         
                         f_consec = calculate_consecutive_days(get_mock_institutional_data(code, "foreign"))
                         t_consec = calculate_consecutive_days(get_mock_institutional_data(code, "trust"))
