@@ -19,10 +19,9 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 # ==================== 核心數據獲取 ====================
 @st.cache_data(ttl=3600)
 def fetch_all_markets():
-    """多重備援架構：抓取上市、上櫃與興櫃資料"""
+    """雙重備援架構：抓取上市、上櫃與興櫃資料"""
     dfs = []
     
-    # 💡 終極防呆成交量轉換：強勢處理空值與千分位符號，一律轉為「張數」
     def safe_vol(x):
         try:
             if pd.isna(x): return 0
@@ -37,7 +36,6 @@ def fetch_all_markets():
         if res.status_code == 200:
             df = pd.DataFrame(res.json())
             df['Market'], df['YF_Ticker'] = '上市', df['Code'] + '.TW'
-            # 解決欄位名稱不一致的致命 Bug
             vol_col = 'TradeVolume' if 'TradeVolume' in df.columns else 'TradingVolume'
             df['API_Volume'] = df.get(vol_col, 0).apply(safe_vol)
             dfs.append(df)
@@ -170,7 +168,6 @@ st.sidebar.header("⚙️ 步驟二：第一層流動性過濾")
 hot_filter = st.sidebar.selectbox("🔥 排行榜預篩:", ["🈚 無 (全市場掃描)", "🏆 僅限今日【成交量】 Top 100", "🏆 僅限今日【成交量】 Top 500"])
 min_volume = st.sidebar.number_input("📉 核心成交量門檻 (張數 >):", min_value=0, max_value=50000, value=500, step=100)
 
-# 💡 針對興櫃量能的專屬控制開關
 ignore_emerging_vol = st.sidebar.checkbox("💡 興櫃股票不受此成交量門檻限制", value=True)
 exclude_emerging = st.sidebar.checkbox("🚫 完全排除興櫃股票", value=False)
 
@@ -204,17 +201,16 @@ if st.sidebar.button("🚀 啟動極速掃描", width="stretch"):
             if not df_all.empty:
                 df_filtered = df_all.copy()
                 
-                # 💡 處理興櫃排除邏輯
                 if exclude_emerging:
                     df_filtered = df_filtered[df_filtered['Market'] != '興櫃']
                 
-                # 💡 第一階段：官方量能預過濾 (只保留大於門檻的股票)
+                # 第一階段：極寬鬆的粗篩 (僅剔除極端低量殭屍股)
+                PRE_FILTER_MIN = 50 
                 if ignore_emerging_vol:
-                    df_filtered = df_filtered[(df_filtered['API_Volume'] >= min_volume) | (df_filtered['Market'] == '興櫃')]
+                    df_filtered = df_filtered[(df_filtered['API_Volume'] >= PRE_FILTER_MIN) | (df_filtered['Market'] == '興櫃')]
                 else:
-                    df_filtered = df_filtered[df_filtered['API_Volume'] >= min_volume]
+                    df_filtered = df_filtered[df_filtered['API_Volume'] >= PRE_FILTER_MIN]
                 
-                # 💡 排行榜過濾必須在門檻過濾之後執行，才不會因為量大股擠爆榜單而漏掉中小股
                 if "Top 500" in hot_filter: 
                     df_filtered = df_filtered.nlargest(500, 'API_Volume')
                 elif "Top 100" in hot_filter: 
@@ -222,15 +218,14 @@ if st.sidebar.button("🚀 啟動極速掃描", width="stretch"):
                 
                 remaining_count = len(df_filtered)
                 if remaining_count == 0:
-                    st.warning("⚠️ 第一關官方量能預篩選後已無符合股票，請放寬量能門檻！")
+                    st.warning("⚠️ 官方量能預篩選後已無符合股票，請嘗試放寬條件！")
                     st.stop()
                     
                 tickers_list = sorted(df_filtered['YF_Ticker'].tolist())
                 progress_bar = st.empty()
-                progress_bar.info(f"📡 已淘汰低量股，正在從 Yahoo 獲取 {remaining_count} 檔精準歷史資料...")
+                progress_bar.info(f"📡 已淘汰低量殭屍股，正在從 Yahoo 獲取 {remaining_count} 檔精準歷史資料...")
 
                 try:
-                    # Polars 優化：批量下載後轉為 DataFrame
                     batch_df = yf.download(tickers_list, period="3mo", group_by="ticker", progress=False)
                 except Exception as e:
                     st.error(f"⚠️ Yahoo Finance 批次連線失敗: {e}")
@@ -245,7 +240,6 @@ if st.sidebar.button("🚀 啟動極速掃描", width="stretch"):
                     market = row.get('Market', '未知')
                     
                     try:
-                        # 處理 Yahoo 格式
                         if len(tickers_list) == 1:
                             sub_df = batch_df.copy()
                         else:
@@ -258,9 +252,7 @@ if st.sidebar.button("🚀 啟動極速掃描", width="stretch"):
                                 
                         if sub_df.empty or len(sub_df) < 15: continue
                         
-                        # 轉換為 Polars 進行高速向量化運算
                         pl_df = pl.from_pandas(sub_df.reset_index())
-                        
                         pl_df = pl_df.with_columns([
                             pl.col("Close").rolling_mean(window_size=5).alias("5MA"),
                             pl.col("Close").rolling_mean(window_size=10).alias("10MA"),
@@ -271,15 +263,16 @@ if st.sidebar.button("🚀 啟動極速掃描", width="stretch"):
                         
                         if pl_df.height < 2: continue
 
-                        # 取得最新兩筆資料
                         today = pl_df.tail(1).to_dicts()[0]
                         yesterday = pl_df.tail(2).head(1).to_dicts()[0]
 
-                        # --- 技術形態判斷 (Polars 版本) ---
+                        # --- 技術形態判斷變數 ---
                         c, o = today["Close"], today["Open"]
-                        l = today["Low"]
-                        ma5_today, ma10_today = today["5MA"], today["10MA"]
-                        ma5_yesterday = yesterday["5MA"]
+                        l, h = today["Low"], today["High"]
+                        ma5_today, ma10_today, ma20_today = today["5MA"], today["10MA"], today["20MA"]
+                        ma5_yesterday, ma10_yesterday, ma20_yesterday = yesterday["5MA"], yesterday["10MA"], yesterday["20MA"]
+                        vol_today = today.get('Volume', 0)
+                        vol_yesterday = yesterday.get('Volume', 0)
                         
                         matched_tags = []
                         if strategy == "做多 (Long)":
@@ -290,12 +283,17 @@ if st.sidebar.button("🚀 啟動極速掃描", width="stretch"):
                             body = c - o
                             is_half = ((c - max(o, ma5_today)) / body >= 0.50 if body > 0 else False)
                             
+                            # 空中加油: 均線多頭、量縮、小實體、守住5MA
+                            is_refueling = (ma5_today > ma10_today) and (vol_today < vol_yesterday) and (abs(c - o) / o < 0.02) and (l >= ma5_today)
+                            
                             if "🔥 下半身紅K" in selected_patterns and is_red and is_ma5_not_desc and is_crossing_up and is_half:
                                 matched_tags.append("🔥 下半身紅K")
                             if "⭐ 五線多頭" in selected_patterns and is_bullish:
                                 matched_tags.append("⭐ 五線多頭")
                             if "⚡ 交叉拉回" in selected_patterns and is_red and c > ma5_today and yesterday["Close"] <= ma5_yesterday:
                                 matched_tags.append("⚡ 交叉拉回")
+                            if "⛽ 空中加油" in selected_patterns and is_refueling:
+                                matched_tags.append("⛽ 空中加油")
 
                         elif strategy == "放空 (Short)":
                             is_bearish = today["5MA"] < today["10MA"] < today["20MA"] < today["30MA"] < today["50MA"]
@@ -303,27 +301,34 @@ if st.sidebar.button("🚀 啟動極速掃描", width="stretch"):
                             is_ma5_not_asc = ma5_today <= ma5_yesterday
                             is_breaking_down = yesterday["Close"] >= ma5_yesterday and c < ma5_today
                             
+                            # 死亡交叉: 今日5MA跌破10MA
+                            is_death_cross = (ma5_today < ma10_today) and (ma5_yesterday >= ma10_yesterday)
+                            
+                            # 反彈遇壓: 20MA下彎、盤中高點碰20MA但收黑且低於20MA
+                            is_rebound_resist = (ma20_today < ma20_yesterday) and (h >= ma20_today) and (c < ma20_today) and is_black
+                            
                             if "🔥 破線黑K" in selected_patterns and is_black and is_ma5_not_asc and is_breaking_down:
                                 matched_tags.append("🔥 破線黑K")
                             if "⭐ 五線空頭" in selected_patterns and is_bearish:
                                 matched_tags.append("⭐ 五線空頭")
+                            if "⚡ 死亡交叉" in selected_patterns and is_death_cross:
+                                matched_tags.append("⚡ 死亡交叉")
+                            if "⛽ 反彈遇壓" in selected_patterns and is_rebound_resist:
+                                matched_tags.append("⛽ 反彈遇壓")
 
                         if not matched_tags: continue
                         pattern_name = " | ".join(matched_tags)
                         
                         # --- 籌碼面與成交量處理 ---
-                        y_vol = int(today.get('Volume', 0) / 1000)
+                        y_vol = int(vol_today / 1000)
                         
-                        # 阻斷假資料：如果是備援策略產生的 999999，強制改用 Yahoo 真實成交量
                         if row['API_Volume'] == 999999:
                             volume_sheets = y_vol
                         elif market == '興櫃':
                             volume_sheets = int(row['API_Volume'])
                         else:
-                            # 優先取用 Yahoo，若 Yahoo 異常則用官方量
                             volume_sheets = y_vol if y_vol > 0 else int(row['API_Volume'])
                             
-                        # 終極防呆：確保最終結果畫面絕對不會印出 999999 假數據
                         if volume_sheets == 999999:
                             volume_sheets = y_vol
                         
@@ -354,7 +359,6 @@ if st.sidebar.button("🚀 啟動極速掃描", width="stretch"):
                 if results:
                     df_final = pd.DataFrame(results).sort_values(by="今日成交量(張)", ascending=False)
                     
-                    # 💡 最後雙重把關
                     if ignore_emerging_vol:
                         df_final = df_final[(df_final['今日成交量(張)'] >= min_volume) | (df_final['市場'] == '興櫃')]
                     else:
