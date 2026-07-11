@@ -21,10 +21,12 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 def fetch_all_markets():
     """四重備援架構：抓取上市、上櫃與興櫃資料，並內建靜態清單防當機"""
     dfs = []
+    
+    # 💡 修正後的成交量轉換邏輯：官方回傳皆為「股數」，一律除以 1000 轉為「張數」
     def safe_vol(x):
         try:
             v = float(str(x).replace(',', ''))
-            return v / 1000 if v > 100000 else v
+            return int(v / 1000)
         except: return 0
 
     # --- 策略 1: 官方 OpenAPI ---
